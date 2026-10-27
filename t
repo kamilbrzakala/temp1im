@@ -1,20 +1,18 @@
-sql
-BEGIN TRAN;
-UPDATE DPRSystemConnection
-SET ConnectionParameter = REPLACE(ConnectionParameter, 'data source=FHCDBIDMMP02;', 'data source=10.212.5.36;'),
-    XDateUpdated = GETUTCDATE()
-WHERE ConnectionParameter LIKE '%data source=FHCDBIDMMP02;%';
+# 1) Którą wersję usługi faktycznie uruchamiamy
+$svc = Get-CimInstance Win32_Service | ? { $_.PathName -match 'One Identity' -or $_.Name -like 'viJobService*' }
+$svc | select Name, State, StartName, PathName | fl
+$dir = Split-Path (($svc.PathName -replace '"','') -split '\.exe')[0]
+"VI.DB.dll       : " + (Get-Item "$dir\VI.DB.dll").VersionInfo.FileVersion
+"JobService.dll  : " + (Get-Item "$dir\JobService.dll" -ErrorAction SilentlyContinue).VersionInfo.FileVersion
+"Katalog         : $dir"
 
-SELECT sh.DisplayName, sc.ConnectionParameter
-FROM DPRSystemConnection sc JOIN DPRShell sh ON sh.UID_DPRShell = sc.UID_DPRShell
-WHERE sc.ConnectionParameter LIKE '%data source=%';
--- COMMIT;
+# 2) Z czym się łączy pod nazwą/IP z JobService.cfg (wstaw to, co wpisałeś w Job Service Configuration)
+$srv = 'FHCDBIDMMP02'
+Resolve-DnsName $srv -ErrorAction SilentlyContinue | select Name, IPAddress
+$cn = New-Object System.Data.SqlClient.SqlConnection "Server=$srv;Database=D1IM;Integrated Security=True"
+$cn.Open(); $c = $cn.CreateCommand()
+$c.CommandText = "select @@SERVERNAME, cast(SERVERPROPERTY('ProductVersion') as varchar(30)), cast(CONNECTIONPROPERTY('local_net_address') as varchar(30))"
+$r = $c.ExecuteReader(); $null = $r.Read(); "SQL: {0} | {1} | {2}" -f $r[0],$r[1],$r[2]; $cn.Close()
 
-Sprawdź przy okazji, czy któryś projekt nie ma też FHCDBIDMMP01 i popraw go analogicznie.
-
-Jeśli UPDATE też wisi, to coś blokuje wiersz. Najpewniej Job Service ciągle próbuje migracji. Sprawdź to tak:
-
-sql
-SELECT session_id, blocking_session_id, wait_type, command, host_name = (SELECT host_name FROM sys.dm_exec_sessions s WHERE s.session_id = r.blocking_session_id)
-FROM sys.dm_exec_requests r
-WHERE blocking_session_id <> 0;
+# 3) Co mówi log przy ostatniej próbie
+Select-String C:\OIMLogs\JobService.log -Pattern '810264','data source','Connect','Version' | select -Last 30
