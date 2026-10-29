@@ -1,17 +1,19 @@
--- which queues are getting jobs
-SELECT Queue, Ready2EXE, COUNT(*) AS cnt
-FROM JobQueue GROUP BY Queue, Ready2EXE ORDER BY Queue;
+# 1. Dokładnie to, co sprawdza Web Installer
+$p = [Environment]::ExpandEnvironmentVariables('%programfiles%\IIS\Asp.Net Core Module\V2')
+"Ścieżka: $p  ->  istnieje: $(Test-Path $p)"
+"Proces 64-bit: $([Environment]::Is64BitProcess)"
 
--- which job servers exist and what they're tagged with
-SELECT s.Ident_Server, s.Queue, t.Ident_QBMServerTag
-FROM QBMServer s
-LEFT JOIN QBMServerHasServerTag x ON x.UID_QBMServer = s.UID_QBMServer
-LEFT JOIN QBMServerTag t ON t.UID_QBMServerTag = x.UID_QBMServerTag
-ORDER BY s.Ident_Server;
+# 2. Runtime'y .NET (OIM 10 potrzebuje 10.x: NETCore + AspNetCore + WindowsDesktop)
+dotnet --list-runtimes
 
--- which server each sync project uses
-SELECT sh.DisplayName, s.Ident_Server, s.Queue
-FROM DPRRootObjConnectionInfo ci
-JOIN DPRSystemVariableSet vs ON vs.UID_DPRSystemVariableSet = ci.UID_DPRSystemVariableSet
-JOIN DPRShell sh ON sh.UID_DPRShell = vs.UID_DPRShell
-LEFT JOIN QBMServer s ON s.UID_QBMServer = ci.UID_QBMServer;
+# 3. Zainstalowane Hosting Bundle
+Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*','HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*' |
+  ? DisplayName -match 'Hosting|Core Module' | select DisplayName, DisplayVersion
+
+# 4. Czy moduł jest zarejestrowany w IIS
+& "$env:windir\System32\inetsrv\appcmd.exe" list modules | Select-String AspNetCore
+Select-String "$env:windir\System32\inetsrv\config\applicationHost.config" -Pattern 'AspNetCoreModuleV2'
+
+# 5. Role IIS
+Get-WindowsFeature Web-Server, Web-Windows-Auth, Web-Asp-Net45, Web-Net-Ext45, Web-ISAPI-Ext, Web-ISAPI-Filter, Web-WebSockets, Web-Mgmt-Console |
+  ft Name, InstallState
