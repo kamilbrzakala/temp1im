@@ -1,15 +1,22 @@
-# A. Sprawdź stan IIS
-Get-ChildItem C:\Windows\System32\inetsrv\config
-Get-ChildItem C:\inetpub\history -EA SilentlyContinue   # automatyczne kopie konfiguracji
-Get-Service W3SVC, WAS
+# 1. Create the cert (put every name you will use in the URL into DnsName)
+$fqdn = [System.Net.Dns]::GetHostEntry($env:COMPUTERNAME).HostName
+$cert = New-SelfSignedCertificate `
+    -DnsName $fqdn, $env:COMPUTERNAME, "localhost" `
+    -CertStoreLocation "Cert:\LocalMachine\My" `
+    -FriendlyName "OIM Dev HTTPS" `
+    -KeyAlgorithm RSA -KeyLength 2048 `
+    -KeyExportPolicy Exportable `
+    -NotAfter (Get-Date).AddYears(3)
+$cert.Thumbprint
 
-  Uninstall-WindowsFeature Web-Server -IncludeManagementTools   # potem restart
-  Install-WindowsFeature Web-Server, Web-Windows-Auth, Web-Asp-Net45, Web-Net-Ext45, Web-ISAPI-Ext, Web-ISAPI-Filter, Web-WebSockets -IncludeManagementTools
+# 2. Trust it on this machine, so browsers and the OIM installer/API Server accept it
+$tmp = "$env:TEMP\oim-dev.cer"
+Export-Certificate -Cert $cert -FilePath $tmp | Out-Null
+Import-Certificate -FilePath $tmp -CertStoreLocation "Cert:\LocalMachine\Root" | Out-Null
 
-# B. Gdy applicationHost.config już istnieje, napraw Hosting Bundle z logiem
-.\dotnet-hosting-10.0.14-win.exe /repair /log C:\temp\hb.log
-iisreset
-
-# C. Weryfikacja: oba polecenia muszą coś zwrócić
-Test-Path 'C:\Program Files\IIS\Asp.Net Core Module\V2'
-& "$env:windir\System32\inetsrv\appcmd.exe" list modules | Select-String AspNetCore
+# 3. Bind it to HTTPS 443 on the Default Web Site
+Import-Module WebAdministration
+if (-not (Get-WebBinding -Name "Default Web Site" -Protocol https)) {
+    New-WebBinding -Name "Default Web Site" -Protocol https -Port 443
+}
+(Get-WebBinding -Name "Default Web Site" -Protocol https).AddSslCertificate($cert.Thumbprint, "My")
