@@ -1,19 +1,15 @@
-# 1. Dokładnie to, co sprawdza Web Installer
-$p = [Environment]::ExpandEnvironmentVariables('%programfiles%\IIS\Asp.Net Core Module\V2')
-"Ścieżka: $p  ->  istnieje: $(Test-Path $p)"
-"Proces 64-bit: $([Environment]::Is64BitProcess)"
+# A. Sprawdź stan IIS
+Get-ChildItem C:\Windows\System32\inetsrv\config
+Get-ChildItem C:\inetpub\history -EA SilentlyContinue   # automatyczne kopie konfiguracji
+Get-Service W3SVC, WAS
 
-# 2. Runtime'y .NET (OIM 10 potrzebuje 10.x: NETCore + AspNetCore + WindowsDesktop)
-dotnet --list-runtimes
+  Uninstall-WindowsFeature Web-Server -IncludeManagementTools   # potem restart
+  Install-WindowsFeature Web-Server, Web-Windows-Auth, Web-Asp-Net45, Web-Net-Ext45, Web-ISAPI-Ext, Web-ISAPI-Filter, Web-WebSockets -IncludeManagementTools
 
-# 3. Zainstalowane Hosting Bundle
-Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*','HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*' |
-  ? DisplayName -match 'Hosting|Core Module' | select DisplayName, DisplayVersion
+# B. Gdy applicationHost.config już istnieje, napraw Hosting Bundle z logiem
+.\dotnet-hosting-10.0.14-win.exe /repair /log C:\temp\hb.log
+iisreset
 
-# 4. Czy moduł jest zarejestrowany w IIS
+# C. Weryfikacja: oba polecenia muszą coś zwrócić
+Test-Path 'C:\Program Files\IIS\Asp.Net Core Module\V2'
 & "$env:windir\System32\inetsrv\appcmd.exe" list modules | Select-String AspNetCore
-Select-String "$env:windir\System32\inetsrv\config\applicationHost.config" -Pattern 'AspNetCoreModuleV2'
-
-# 5. Role IIS
-Get-WindowsFeature Web-Server, Web-Windows-Auth, Web-Asp-Net45, Web-Net-Ext45, Web-ISAPI-Ext, Web-ISAPI-Filter, Web-WebSockets, Web-Mgmt-Console |
-  ft Name, InstallState
