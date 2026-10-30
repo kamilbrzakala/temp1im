@@ -1,0 +1,8 @@
+update DialogSchedule 
+	set Enabled = 1 
+	where uid_dialogschedule in 
+		(select uid_DialogSchedule
+		from CCC_DialogSchedule
+		where Enabled = 1);
+		
+drop table CCC_DialogSchedule;
