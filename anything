@@ -1,8 +1,34 @@
-update DialogSchedule 
-	set Enabled = 1 
-	where uid_dialogschedule in 
-		(select uid_DialogSchedule
-		from CCC_DialogSchedule
-		where Enabled = 1);
-		
-drop table CCC_DialogSchedule;
+-- Backup copy of the secret variables for all Azure AD projects
+SELECT v.*, s.DisplayName AS ProjectName
+INTO zz_Backup_DPRSystemVariable_AAD_20261030
+FROM DPRSystemVariable v
+JOIN DPRSystemVariableSet vs ON vs.UID_DPRSystemVariableSet = v.UID_DPRSystemVariableSet
+JOIN DPRShell s ON s.UID_DPRShell = vs.UID_DPRShell
+WHERE s.DisplayName LIKE 'Azure Active Directory tenant%'
+  AND v.IsSecret = 1;
+
+SELECT ProjectName, Name, LEN(Value) AS Len, LEFT(Value, 12) AS ValStart
+FROM zz_Backup_DPRSystemVariable_AAD_20261030;
+
+
+BEGIN TRAN;
+
+UPDATE v
+SET v.Value = NULL
+FROM DPRSystemVariable v
+JOIN DPRSystemVariableSet vs ON vs.UID_DPRSystemVariableSet = v.UID_DPRSystemVariableSet
+JOIN DPRShell s ON s.UID_DPRShell = vs.UID_DPRShell
+WHERE s.DisplayName LIKE 'Azure Active Directory tenant%'
+  AND v.IsSecret = 1;
+
+SELECT @@ROWCOUNT AS RowsCleared;   -- should match the count from step 1
+-- COMMIT;   -- run this if the count is right
+-- ROLLBACK; -- otherwise
+
+
+SELECT s.DisplayName, c.ConnectionParameter
+FROM DPRSystemConnection c
+JOIN DPRShell s ON s.UID_DPRShell = c.UID_DPRShell
+WHERE s.DisplayName LIKE 'Azure Active Directory tenant%';
+
+
