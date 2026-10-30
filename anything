@@ -1,19 +1,25 @@
-1. Get the exact row with SQL
+That’s expected. I checked the column definitions: neither DPRSystemVariable.Value nor DPRSystemConnection is marked as an encrypted column (IsCrypted = 0). So Object Browser and the Designer save the value as you type it, even in an encrypted database.
 
-Use the variable name from your backup table, for example CP_Secret:
+The sync engine handles secret variables differently. In an encrypted database, it expects every variable marked IsSecret = 1 to hold encrypted text and decrypts it when it reads it. That also explains the error you started with: a plain-text value in a secret variable fails to decrypt, and you get “The input is not a valid Base-64 string”. Only the Synchronization Editor encrypts these values when it saves, and it’s locked until the migration succeeds.
 
+Workaround: make the variable non-secret for the migration
+
+Unmark it as secret and enter the value. On that DPRSystemVariable row, in Object Browser or with SQL:
 sql
-SELECT v.UID_DPRSystemVariable, v.Name, vs.DisplayName AS VariableSet
-FROM DPRSystemVariable v
-JOIN DPRSystemVariableSet vs ON vs.UID_DPRSystemVariableSet = v.UID_DPRSystemVariableSet
-WHERE vs.UID_DPRShell = 'CCC-C896577877382F4C96968BF05A5B90B7'
-  AND v.IsSecret = 1;
+   UPDATE DPRSystemVariable
+   SET IsSecret = 0, Value = '<client secret>'
+   WHERE UID_DPRSystemVariable = '<UID from the earlier query>';
 
-2. Edit it in Object Browser
+The engine reads a non-secret variable as-is, so nothing tries to decrypt it.
+2. Trigger MIGRATE on the DPRShell row and wait for it to finish in Job Queue Info. IsFinalized should go back to 3.
+3. Mark it as secret again. Open the project, which can now be edited. In the Synchronization Editor go to Configuration → Variables, select the variable, tick Secret, then save and commit. The editor encrypts the value itself.
+4. Check with SELECT LEFT(Value, 20), IsSecret FROM DPRSystemVariable WHERE UID_DPRSystemVariable = '…'. You should see Base64-looking encrypted text and IsSecret = 1.
 
-Open Object Browser and connect to the FHLB database.
-In the table list on the left, type DPRSystemVariable and select it.
-Filter the object list with a where clause:
-UID_DPRSystemVariable = '<UID from step 1>'
-Open the object. Under Simple properties, click Value, then paste the client secret.
-Save with Ctrl+S or the save button.
+Do the same for the other three tenants.
+
+Two cautions:
+
+The secret sits in plain text in the database until step 3, so do step 3 straight away. If your security team wants it, rotate the secret afterwards.
+This works as long as the secret is a variable the connection refers to, like %CP_Secret%. If the secret is typed directly into DPRSystemConnection.ConnectionParameter, send me that string with the secret masked and I’ll show you what to change.
+
+I worked this out from the column definitions and the error, not by reading the engine’s code. Test it on one tenant before doing the other three.
