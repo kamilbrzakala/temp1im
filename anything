@@ -1,5 +1,19 @@
+1. Get the exact row with SQL
+
+Use the variable name from your backup table, for example CP_Secret:
+
+sql
 SELECT v.UID_DPRSystemVariable, v.Name, vs.DisplayName AS VariableSet
 FROM DPRSystemVariable v
 JOIN DPRSystemVariableSet vs ON vs.UID_DPRSystemVariableSet = v.UID_DPRSystemVariableSet
 WHERE vs.UID_DPRShell = 'CCC-C896577877382F4C96968BF05A5B90B7'
   AND v.IsSecret = 1;
+
+2. Edit it in Object Browser
+
+Open Object Browser and connect to the FHLB database.
+In the table list on the left, type DPRSystemVariable and select it.
+Filter the object list with a where clause:
+UID_DPRSystemVariable = '<UID from step 1>'
+Open the object. Under Simple properties, click Value, then paste the client secret.
+Save with Ctrl+S or the save button.
