@@ -1,15 +1,11 @@
--- what is sitting in Current (the reset entry and anything else)
-select SlotNumber, UID_Task, count(*) as Cnt, min(StartedAt) as FirstStarted
-from QBMDBQueueCurrent group by SlotNumber, UID_Task;
-
--- DB-side errors/journal from the agent and slot procedures
-select top 100 MessageDate, MessageType, ApplicationName, HostName, MessageString
+-- full error text
+select top 3 MessageDate, MessageString
 from DialogJournal
-where MessageDate > dateadd(hour, -6, getutcdate())
+where ApplicationName = 'DBQueue Processor'
 order by MessageDate desc;
 
--- do the queued tasks have a metric / path length? (missing = "no path to root, will not be processed")
-select o.UID_Task, m.PathLength, m.MaxInstanceEffective
-from dbo.QBM_FTDBQCSOverviewLoad(0,0) o
-left join QBMDBQueueTaskMetric m on m.UID_Task = o.UID_Task
-where o.UID_Task not in ('TASKCHECKSUM','CountTotal','CurrentChecksum');
+-- the failing object
+select c.SlotNumber, c.UID_Parameter, c.StartedAt, d.*
+from QBMDBQueueCurrent c
+left join DialogDashboardDef d on d.UID_DialogDashboardDef = c.UID_Parameter
+where c.UID_Task = 'QBM-K-CommonDashboardDef';
