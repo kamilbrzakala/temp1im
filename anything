@@ -1,17 +1,6 @@
--- 1. Emergency-off / traffic light
-declare @tl int; exec QBM_PTrafficLight @tl output; select @tl as TrafficLight;
+select c.UID_Task, count(*) as Cnt
+from QBMDBQueueCurrent c
+group by c.UID_Task
+order by Cnt desc;
 
--- 2. Is anyone holding the DB agent application lock?
-select l.request_session_id, s.host_name, s.program_name, s.login_name, l.request_mode, l.resource_description
-from sys.dm_tran_locks l
-join sys.dm_exec_sessions s on s.session_id = l.request_session_id
-where l.resource_type = 'APPLICATION' and l.resource_database_id = db_id();
-
--- 3. Who is connected to this DB (look for a second server / old v9 job service / DatabaseAgentServiceCmd)
-select session_id, host_name, program_name, login_name, status, last_request_start_time
-from sys.dm_exec_sessions
-where database_id = db_id() and is_user_process = 1
-order by host_name, program_name;
-
--- 4. Slot state
-select * from QBMDBQueueSlot;
+select * from QBMDBQueueCurrent where UID_Task = 'QBM-K-CommonWaitForCompiler';
