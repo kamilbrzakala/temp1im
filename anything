@@ -1,25 +1,17 @@
-That’s expected. I checked the column definitions: neither DPRSystemVariable.Value nor DPRSystemConnection is marked as an encrypted column (IsCrypted = 0). So Object Browser and the Designer save the value as you type it, even in an encrypted database.
+-- 1. Emergency-off / traffic light
+declare @tl int; exec QBM_PTrafficLight @tl output; select @tl as TrafficLight;
 
-The sync engine handles secret variables differently. In an encrypted database, it expects every variable marked IsSecret = 1 to hold encrypted text and decrypts it when it reads it. That also explains the error you started with: a plain-text value in a secret variable fails to decrypt, and you get “The input is not a valid Base-64 string”. Only the Synchronization Editor encrypts these values when it saves, and it’s locked until the migration succeeds.
+-- 2. Is anyone holding the DB agent application lock?
+select l.request_session_id, s.host_name, s.program_name, s.login_name, l.request_mode, l.resource_description
+from sys.dm_tran_locks l
+join sys.dm_exec_sessions s on s.session_id = l.request_session_id
+where l.resource_type = 'APPLICATION' and l.resource_database_id = db_id();
 
-Workaround: make the variable non-secret for the migration
+-- 3. Who is connected to this DB (look for a second server / old v9 job service / DatabaseAgentServiceCmd)
+select session_id, host_name, program_name, login_name, status, last_request_start_time
+from sys.dm_exec_sessions
+where database_id = db_id() and is_user_process = 1
+order by host_name, program_name;
 
-Unmark it as secret and enter the value. On that DPRSystemVariable row, in Object Browser or with SQL:
-sql
-   UPDATE DPRSystemVariable
-   SET IsSecret = 0, Value = '<client secret>'
-   WHERE UID_DPRSystemVariable = '<UID from the earlier query>';
-
-The engine reads a non-secret variable as-is, so nothing tries to decrypt it.
-2. Trigger MIGRATE on the DPRShell row and wait for it to finish in Job Queue Info. IsFinalized should go back to 3.
-3. Mark it as secret again. Open the project, which can now be edited. In the Synchronization Editor go to Configuration → Variables, select the variable, tick Secret, then save and commit. The editor encrypts the value itself.
-4. Check with SELECT LEFT(Value, 20), IsSecret FROM DPRSystemVariable WHERE UID_DPRSystemVariable = '…'. You should see Base64-looking encrypted text and IsSecret = 1.
-
-Do the same for the other three tenants.
-
-Two cautions:
-
-The secret sits in plain text in the database until step 3, so do step 3 straight away. If your security team wants it, rotate the secret afterwards.
-This works as long as the secret is a variable the connection refers to, like %CP_Secret%. If the secret is typed directly into DPRSystemConnection.ConnectionParameter, send me that string with the secret masked and I’ll show you what to change.
-
-I worked this out from the column definitions and the error, not by reading the engine’s code. Test it on one tenant before doing the other three.
+-- 4. Slot state
+select * from QBMDBQueueSlot;
