@@ -1,6 +1,18 @@
-select c.UID_Task, count(*) as Cnt
-from QBMDBQueueCurrent c
-group by c.UID_Task
-order by Cnt desc;
+select SingleUserProcess, SingleUserStart, UID_CutOffTask, IsDBSchedulerDisabled, UpdatePhase
+from DialogDatabase where IsMainDatabase = 1;
 
-select * from QBMDBQueueCurrent where UID_Task = 'QBM-K-CommonWaitForCompiler';
+-- what the agent actually sees
+select * from dbo.QBM_FTDBQCSOverviewLoad(0, 0);
+
+-- queued rows by generation (agent only picks Generation >= 0)
+select Generation, count(*) from DialogDBQueue group by Generation;
+
+-- confirm that SPID is not alive / not a running compiler first
+select session_id, program_name, host_name from sys.dm_exec_sessions where session_id = <SingleUserProcess>;
+
+declare @r int;
+exec @r = QBM_PSingleUserRelease @RequestingProcessID = <SingleUserProcess>;
+select @r;   -- 1 = released
+
+
+exec QBM_PDBQueueExternalTaskFire @uid_Task = 'QBM-K-CommonWaitForCompiler';
