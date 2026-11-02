@@ -1,18 +1,15 @@
-select SingleUserProcess, SingleUserStart, UID_CutOffTask, IsDBSchedulerDisabled, UpdatePhase
-from DialogDatabase where IsMainDatabase = 1;
+-- what is sitting in Current (the reset entry and anything else)
+select SlotNumber, UID_Task, count(*) as Cnt, min(StartedAt) as FirstStarted
+from QBMDBQueueCurrent group by SlotNumber, UID_Task;
 
--- what the agent actually sees
-select * from dbo.QBM_FTDBQCSOverviewLoad(0, 0);
+-- DB-side errors/journal from the agent and slot procedures
+select top 100 MessageDate, MessageType, ApplicationName, HostName, MessageString
+from DialogJournal
+where MessageDate > dateadd(hour, -6, getutcdate())
+order by MessageDate desc;
 
--- queued rows by generation (agent only picks Generation >= 0)
-select Generation, count(*) from DialogDBQueue group by Generation;
-
--- confirm that SPID is not alive / not a running compiler first
-select session_id, program_name, host_name from sys.dm_exec_sessions where session_id = <SingleUserProcess>;
-
-declare @r int;
-exec @r = QBM_PSingleUserRelease @RequestingProcessID = <SingleUserProcess>;
-select @r;   -- 1 = released
-
-
-exec QBM_PDBQueueExternalTaskFire @uid_Task = 'QBM-K-CommonWaitForCompiler';
+-- do the queued tasks have a metric / path length? (missing = "no path to root, will not be processed")
+select o.UID_Task, m.PathLength, m.MaxInstanceEffective
+from dbo.QBM_FTDBQCSOverviewLoad(0,0) o
+left join QBMDBQueueTaskMetric m on m.UID_Task = o.UID_Task
+where o.UID_Task not in ('TASKCHECKSUM','CountTotal','CurrentChecksum');
