@@ -1,15 +1,23 @@
--- 1) Generate* chain should drop to 0
-SELECT m.UID_Task, m.PathLength, m.CountInDBQueue, m.CountProcessing
-FROM QBMDBQueueTaskMetric m
-WHERE m.CountInDBQueue + m.CountProcessing > 0 ORDER BY m.PathLength;
+DECLARE @ev TABLE (UID varchar(38));
+INSERT @ev VALUES ('CCC-3AB2D662F1CE0D41A9697CF14A8F7E77'),('CCC-1D3689F1A24AD24DB6AED7B7090E82D8'),
+ ('CCC-369E58D22854FB41BB6E214290EC5E29'),('CCC-098FF5BAEEAD934995A94459C9297164'),
+ ('CCC-8E1FF6538C75794AB547E077E1C348A0'),('CCC-A39C73E721F1CA499CDDACE2FE666841'),
+ ('CCC-73A06AD7BE896CD212F860D3A6838986'),('CCC-2D81625680BF0149A574C28FD6A7DFB');
+-- the last UID is partly cut off in the screenshot; correct it if needed
 
--- 2) Is any CommonDashboardDef still in the queue, and for which statistic?
-SELECT q.Object, d.DisplayName, d.IsInActive, q.Generation
-FROM DialogDBQueue q LEFT JOIN DialogDashBoardDef d ON d.UID_DialogDashBoardDef = q.Object
-WHERE q.UID_Task = 'QBM-K-CommonDashboardDef';
+-- the events themselves: which table, who created them
+SELECT e.UID_QBMEvent, e.EventName, t.TableName, e.XUserInserted, e.XDateInserted
+FROM QBMEvent e JOIN @ev x ON x.UID = e.UID_QBMEvent
+LEFT JOIN DialogTable t ON t.UID_DialogTable = e.UID_DialogTable;
 
--- 3) Any NEW DashBoardDefine errors since you disabled it?
-SELECT MessageDate, MessageString FROM DialogJournal
-WHERE MessageType = 'E' AND MessageString LIKE '%DashBoardDefine%'
-  AND MessageDate > '2026-11-04 22:05'
-ORDER BY MessageDate DESC;
+-- blocker 1: process plans (QBM_113)
+SELECT a.UID_JobAutoStart, a.Name, a.UID_QBMEvent, a.XUserInserted
+FROM JobAutoStart a JOIN @ev x ON x.UID = a.UID_QBMEvent;
+
+-- blocker 2: processes attached to the events
+SELECT g.UID_JobEventGen, jc.Name AS ProcessName, g.UID_QBMEvent, g.XUserInserted
+FROM JobEventGen g JOIN @ev x ON x.UID = g.UID_QBMEvent
+LEFT JOIN JobChain jc ON jc.UID_JobChain = g.UID_JobChain;
+
+-- blocker 3: ITDR playbooks (if any)
+SELECT p.* FROM POLPlaybookAction p JOIN @ev x ON x.UID = p.UID_QBMEvent;
