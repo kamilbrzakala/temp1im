@@ -1,32 +1,3 @@
-/* ===== Blokada: QBM-K-CommonDashboardDef (poziom 49000) blokuje Generate* (50000+) ===== */
-
--- 1) Ktora statystyka (DialogDashBoardDef) jest w kolejce i ile razy byla resetowana
-SELECT cu.SlotNumber, cu.StartedAt, q.Object AS UID_DialogDashBoardDef, q.Generation,
-       d.Ident_DialogDashboardDef, d.DisplayName, d.IsInActive, d.IsManual,
-       d.XUserUpdated, d.XDateUpdated
-FROM DialogDBQueue q
-LEFT JOIN QBMDBQueueCurrent cu ON cu.UID_DialogDBQueue = q.UID_DialogDBQueue
-LEFT JOIN DialogDashBoardDef d  ON d.UID_DialogDashBoardDef = q.Object
-WHERE q.UID_Task = 'QBM-K-CommonDashboardDef';
-
--- 2) Pelny komunikat bledu (w journalu jest uciety) - uruchom recznie dla UID z pkt 1
---    Pokaze dokladny blad SQL z QueryDefinition (np. nieistniejaca kolumna/tabela)
-DECLARE @uid varchar(38) = '<UID_DialogDashBoardDef z pkt 1>';
-SELECT QueryDefinition, QueryDefinition100 FROM DialogDashBoardDef WHERE UID_DialogDashBoardDef = @uid;
-DECLARE @q nvarchar(max) = (SELECT QueryDefinition FROM DialogDashBoardDef WHERE UID_DialogDashBoardDef = @uid);
-EXEC sp_describe_first_result_set @q;        -- tylko kompiluje zapytanie, nic nie tworzy; blad w Messages
-SET @q = (SELECT QueryDefinition100 FROM DialogDashBoardDef WHERE UID_DialogDashBoardDef = @uid);
-IF @q > ' ' EXEC sp_describe_first_result_set @q;
--- Wymagania OIM: kolumna ElementName + ElementValue typu int/float (opcjonalnie ElementObjectKey, ElementOrder, ElementValueZ)
-
--- 3a) NAPRAWA docelowa: popraw QueryDefinition w Designerze
---     (Designer > User interface > Statistics > <statystyka>), zapisz do bazy.
--- 3b) NAPRAWA szybka: wylacz statystyke (procedura wtedy konczy sie bez generowania widoku)
--- UPDATE DialogDashBoardDef SET IsInActive = 1 WHERE UID_DialogDashBoardDef = @uid;
-
--- 4) Kontrola po naprawie (po kilku minutach): poziomy 49000-54000 powinny zejsc do 0
-SELECT m.UID_Task, m.PathLength, m.CountInDBQueue, m.CountProcessing, m.CountResetted
+SELECT m.UID_Task, m.PathLength, m.CountInDBQueue, m.CountProcessing
 FROM QBMDBQueueTaskMetric m
 WHERE m.CountInDBQueue + m.CountProcessing > 0 ORDER BY m.PathLength;
-SELECT * FROM QBMDBQueueCurrent WHERE UID_Task = 'QBM-K-CommonDashboardDef';
-
