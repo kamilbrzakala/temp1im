@@ -1,3 +1,15 @@
+-- 1) Generate* chain should drop to 0
 SELECT m.UID_Task, m.PathLength, m.CountInDBQueue, m.CountProcessing
 FROM QBMDBQueueTaskMetric m
 WHERE m.CountInDBQueue + m.CountProcessing > 0 ORDER BY m.PathLength;
+
+-- 2) Is any CommonDashboardDef still in the queue, and for which statistic?
+SELECT q.Object, d.DisplayName, d.IsInActive, q.Generation
+FROM DialogDBQueue q LEFT JOIN DialogDashBoardDef d ON d.UID_DialogDashBoardDef = q.Object
+WHERE q.UID_Task = 'QBM-K-CommonDashboardDef';
+
+-- 3) Any NEW DashBoardDefine errors since you disabled it?
+SELECT MessageDate, MessageString FROM DialogJournal
+WHERE MessageType = 'E' AND MessageString LIKE '%DashBoardDefine%'
+  AND MessageDate > '2026-11-04 22:05'
+ORDER BY MessageDate DESC;
