@@ -1,23 +1,29 @@
-DECLARE @ev TABLE (UID varchar(38));
-INSERT @ev VALUES ('CCC-3AB2D662F1CE0D41A9697CF14A8F7E77'),('CCC-1D3689F1A24AD24DB6AED7B7090E82D8'),
- ('CCC-369E58D22854FB41BB6E214290EC5E29'),('CCC-098FF5BAEEAD934995A94459C9297164'),
- ('CCC-8E1FF6538C75794AB547E077E1C348A0'),('CCC-A39C73E721F1CA499CDDACE2FE666841'),
- ('CCC-73A06AD7BE896CD212F860D3A6838986'),('CCC-2D81625680BF0149A574C28FD6A7DFB');
--- the last UID is partly cut off in the screenshot; correct it if needed
+DECLARE @ev TABLE (UID varchar(38) PRIMARY KEY);
+INSERT @ev SELECT UID_QBMEvent FROM QBMEvent
+WHERE EventName IN ('CCC_CONSISTENCY_CHECK_AdaptiveShield_ENTITLEMENTS','CCC_CONSISTENCY_CHECK_AdaptiveShield_USERS',
+                    'CCC_CONSISTENCY_CHECK_Starling-Dev_ENTITLEMENTS','CCC_CONSISTENCY_CHECK_Starling-Dev_USERS',
+                    'CCC_IT_SHOP_BULK_LOAD');
 
--- the events themselves: which table, who created them
-SELECT e.UID_QBMEvent, e.EventName, t.TableName, e.XUserInserted, e.XDateInserted
-FROM QBMEvent e JOIN @ev x ON x.UID = e.UID_QBMEvent
-LEFT JOIN DialogTable t ON t.UID_DialogTable = e.UID_DialogTable;
+-- 1) Every FK reference to QBMEvent, generated dynamically from QBMRelation
+DECLARE @sql nvarchar(max) = N'';
+SELECT @sql += CONCAT(N'SELECT ''', ct.TableName, N''' AS RefTable, ''', r.RelationID, N''' AS RuleID, ',
+       N'c.', cc.ColumnName, N' AS UID_QBMEvent, c.XObjectKey, c.XMarkedForDeletion, c.XUserInserted, c.XDateInserted ',
+       N'FROM ', ct.TableName, N' c JOIN #ev x ON x.UID = c.', cc.ColumnName, N' UNION ALL ')
+FROM QBMRelation r
+JOIN DialogColumn pc ON pc.UID_DialogColumn = r.UID_ParentColumn
+JOIN DialogTable  pt ON pt.UID_DialogTable  = pc.UID_DialogTable
+JOIN DialogColumn cc ON cc.UID_DialogColumn = r.UID_ChildColumn
+JOIN DialogTable  ct ON ct.UID_DialogTable  = cc.UID_DialogTable
+WHERE pt.TableName = 'QBMEvent' AND OBJECT_ID(ct.TableName) IS NOT NULL;
+SELECT * INTO #ev FROM @ev;
+SET @sql = LEFT(@sql, LEN(@sql) - 10);
+EXEC (@sql);
 
--- blocker 1: process plans (QBM_113)
-SELECT a.UID_JobAutoStart, a.Name, a.UID_QBMEvent, a.XUserInserted
-FROM JobAutoStart a JOIN @ev x ON x.UID = a.UID_QBMEvent;
+-- 2) Process plans in detail (most likely blocker), including hidden/marked ones
+SELECT a.UID_JobAutoStart, a.Name, a.XMarkedForDeletion, s.Name AS ScheduleName, e.EventName
+FROM JobAutoStart a
+JOIN #ev x ON x.UID = a.UID_QBMEvent
+JOIN QBMEvent e ON e.UID_QBMEvent = a.UID_QBMEvent
+LEFT JOIN DialogSchedule s ON s.UID_DialogSchedule = a.UID_DialogSchedule;
 
--- blocker 2: processes attached to the events
-SELECT g.UID_JobEventGen, jc.Name AS ProcessName, g.UID_QBMEvent, g.XUserInserted
-FROM JobEventGen g JOIN @ev x ON x.UID = g.UID_QBMEvent
-LEFT JOIN JobChain jc ON jc.UID_JobChain = g.UID_JobChain;
-
--- blocker 3: ITDR playbooks (if any)
-SELECT p.* FROM POLPlaybookAction p JOIN @ev x ON x.UID = p.UID_QBMEvent;
+DROP TABLE #ev;
