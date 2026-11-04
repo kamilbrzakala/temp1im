@@ -1,36 +1,32 @@
-/* ===== OIM v9.x - diagnostyka zablokowanego DBQueue (Generate* / Trigger tasks) ===== */
+/* ===== Blokada: QBM-K-CommonDashboardDef (poziom 49000) blokuje Generate* (50000+) ===== */
 
--- 1) Ogolny stan systemu (to samo co widzi Manager/Designer w "System status")
-SELECT * FROM QBMVSystemState;
+-- 1) Ktora statystyka (DialogDashBoardDef) jest w kolejce i ile razy byla resetowana
+SELECT cu.SlotNumber, cu.StartedAt, q.Object AS UID_DialogDashBoardDef, q.Generation,
+       d.Ident_DialogDashboardDef, d.DisplayName, d.IsInActive, d.IsManual,
+       d.XUserUpdated, d.XDateUpdated
+FROM DialogDBQueue q
+LEFT JOIN QBMDBQueueCurrent cu ON cu.UID_DialogDBQueue = q.UID_DialogDBQueue
+LEFT JOIN DialogDashBoardDef d  ON d.UID_DialogDashBoardDef = q.Object
+WHERE q.UID_Task = 'QBM-K-CommonDashboardDef';
 
--- 2) Flagi bazy, ktore zatrzymuja DBQueue
-SELECT IsDBSchedulerDisabled,      -- 1 = DBQueue processing disabled
-       IsJobServiceDisabled,
-       SingleUserProcess,          -- >0 = single user mode (np. po przerwanym compile/migracji)
-       UpdatePhase,                -- >0 = "System update running"
-       UID_CutOffTask              -- NOT NULL = procesor stoi na "cut-off" (czeka na kompilator)
-FROM DialogDatabase WHERE IsMainDatabase = 1;
+-- 2) Pelny komunikat bledu (w journalu jest uciety) - uruchom recznie dla UID z pkt 1
+--    Pokaze dokladny blad SQL z QueryDefinition (np. nieistniejaca kolumna/tabela)
+DECLARE @uid varchar(38) = '<UID_DialogDashBoardDef z pkt 1>';
+SELECT QueryDefinition, QueryDefinition100 FROM DialogDashBoardDef WHERE UID_DialogDashBoardDef = @uid;
+DECLARE @q nvarchar(max) = (SELECT QueryDefinition FROM DialogDashBoardDef WHERE UID_DialogDashBoardDef = @uid);
+EXEC sp_describe_first_result_set @q;        -- tylko kompiluje zapytanie, nic nie tworzy; blad w Messages
+SET @q = (SELECT QueryDefinition100 FROM DialogDashBoardDef WHERE UID_DialogDashBoardDef = @uid);
+IF @q > ' ' EXEC sp_describe_first_result_set @q;
+-- Wymagania OIM: kolumna ElementName + ElementValue typu int/float (opcjonalnie ElementObjectKey, ElementOrder, ElementValueZ)
 
--- 3) Czy Database Agent Service jest podpiety do bazy
-SELECT session_id, program_name, host_name, login_name, login_time, status
-FROM sys.dm_exec_sessions
-WHERE database_id = DB_ID() AND (program_name = 'OneIM_DatabaseAgent' OR program_name LIKE 'OneIM_Bootstrap%');
+-- 3a) NAPRAWA docelowa: popraw QueryDefinition w Designerze
+--     (Designer > User interface > Statistics > <statystyka>), zapisz do bazy.
+-- 3b) NAPRAWA szybka: wylacz statystyke (procedura wtedy konczy sie bez generowania widoku)
+-- UPDATE DialogDashBoardDef SET IsInActive = 1 WHERE UID_DialogDashBoardDef = @uid;
 
--- 4) Kolejka wg poziomow (PathLength = "Sort order" w Managerze)
+-- 4) Kontrola po naprawie (po kilku minutach): poziomy 49000-54000 powinny zejsc do 0
 SELECT m.UID_Task, m.PathLength, m.CountInDBQueue, m.CountProcessing, m.CountResetted
 FROM QBMDBQueueTaskMetric m
-WHERE m.CountInDBQueue + m.CountProcessing > 0
-ORDER BY m.PathLength;
-
--- 5) Wpisy "zawieszone" - wyjete do slotu (Generation = -1), a slot juz nie istnieje
-SELECT q.UID_Task, q.Generation, COUNT(*) cnt
-FROM DialogDBQueue q GROUP BY q.UID_Task, q.Generation ORDER BY q.UID_Task;
-SELECT cu.SlotNumber, cu.UID_Task, cu.StartedAt, COUNT(*) cnt
-FROM QBMDBQueueCurrent cu GROUP BY cu.SlotNumber, cu.UID_Task, cu.StartedAt ORDER BY cu.StartedAt;
-
--- 6) Ostatnie bledy DBQueue / kompilacji w journalu
-SELECT TOP 50 MessageDate, MessageType, ApplicationName, HostName, MessageString
-FROM DialogJournal
-WHERE MessageType IN ('E','W') AND MessageDate > DATEADD(day,-10,GETUTCDATE())
-ORDER BY MessageDate DESC;
+WHERE m.CountInDBQueue + m.CountProcessing > 0 ORDER BY m.PathLength;
+SELECT * FROM QBMDBQueueCurrent WHERE UID_Task = 'QBM-K-CommonDashboardDef';
 
