@@ -1,29 +1,121 @@
-DECLARE @ev TABLE (UID varchar(38) PRIMARY KEY);
-INSERT @ev SELECT UID_QBMEvent FROM QBMEvent
-WHERE EventName IN ('CCC_CONSISTENCY_CHECK_AdaptiveShield_ENTITLEMENTS','CCC_CONSISTENCY_CHECK_AdaptiveShield_USERS',
-                    'CCC_CONSISTENCY_CHECK_Starling-Dev_ENTITLEMENTS','CCC_CONSISTENCY_CHECK_Starling-Dev_USERS',
-                    'CCC_IT_SHOP_BULK_LOAD');
+/* =====================================================================
+   SyncProject_Customizations.sql
+   What was changed in ONE sync project after the wizard created it
+   (mappings, rules, workflows, steps, schema, filters, variables, start configs).
 
--- 1) Every FK reference to QBMEvent, generated dynamically from QBMRelation
-DECLARE @sql nvarchar(max) = N'';
-SELECT @sql += CONCAT(N'SELECT ''', ct.TableName, N''' AS RefTable, ''', r.RelationID, N''' AS RuleID, ',
-       N'c.', cc.ColumnName, N' AS UID_QBMEvent, c.XObjectKey, c.XMarkedForDeletion, c.XUserInserted, c.XDateInserted ',
-       N'FROM ', ct.TableName, N' c JOIN #ev x ON x.UID = c.', cc.ColumnName, N' UNION ALL ')
-FROM QBMRelation r
-JOIN DialogColumn pc ON pc.UID_DialogColumn = r.UID_ParentColumn
-JOIN DialogTable  pt ON pt.UID_DialogTable  = pc.UID_DialogTable
-JOIN DialogColumn cc ON cc.UID_DialogColumn = r.UID_ChildColumn
-JOIN DialogTable  ct ON ct.UID_DialogTable  = cc.UID_DialogTable
-WHERE pt.TableName = 'QBMEvent' AND OBJECT_ID(ct.TableName) IS NOT NULL;
-SELECT * INTO #ev FROM @ev;
-SET @sql = LEFT(@sql, LEN(@sql) - 10);
-EXEC (@sql);
+   How it works: the wizard writes every object of a new sync project
+   in the same minute. Anything inserted or updated noticeably later
+   (@GraceMinutes) was added or changed afterwards by a person, a patch
+   or an upgrade. XUserInserted/XUserUpdated tell you which.
+     - person account  -> customization
+     - sa / QBM_*      -> usually a sync project patch or DB upgrade
+   Part 2 lists the usual places for customizations, whatever their dates.
 
--- 2) Process plans in detail (most likely blocker), including hidden/marked ones
-SELECT a.UID_JobAutoStart, a.Name, a.XMarkedForDeletion, s.Name AS ScheduleName, e.EventName
-FROM JobAutoStart a
-JOIN #ev x ON x.UID = a.UID_QBMEvent
-JOIN QBMEvent e ON e.UID_QBMEvent = a.UID_QBMEvent
-LEFT JOIN DialogSchedule s ON s.UID_DialogSchedule = a.UID_DialogSchedule;
+   Limitation: anything customized in the same Sync Editor session as the
+   wizard (before the first save) is time-stamped with the creation and
+   only shows up in Part 2.
+   ===================================================================== */
+SET NOCOUNT ON;
+DECLARE @ShellName    nvarchar(256) = N'%Active Roles%';  -- LIKE pattern on the sync project display name
+DECLARE @GraceMinutes int           = 10;
 
-DROP TABLE #ev;
+DECLARE @sh varchar(38), @created datetime, @creator nvarchar(64);
+SELECT TOP 1 @sh = UID_DPRShell, @created = XDateInserted, @creator = XUserInserted
+FROM DPRShell WHERE DisplayName LIKE @ShellName ORDER BY XDateInserted;
+
+IF @sh IS NULL BEGIN
+  SELECT 'No sync project matches the pattern. Available:' AS Info, DisplayName FROM DPRShell;
+  RETURN;
+END
+SELECT DisplayName AS SyncProject, @created AS CreatedAt, @creator AS CreatedBy FROM DPRShell WHERE UID_DPRShell = @sh;
+
+DECLARE @cut datetime = DATEADD(minute, @GraceMinutes, @created);
+
+/* ---------- PART 1: everything inserted/updated after creation ---------- */
+;WITH x AS (
+  SELECT 'Mapping' Obj, m.Name Item, NULL Detail, m.XUserInserted UI, m.XDateInserted DI, m.XUserUpdated UU, m.XDateUpdated DU
+    FROM DPRSystemMap m WHERE m.UID_DPRShell = @sh
+  UNION ALL
+  SELECT 'MappingRule', m.Name + ' / ' + r.Name, ISNULL(r.PropertyLeft,'') + ' <-> ' + ISNULL(r.PropertyRight,'') + ' [' + ISNULL(r.MappingDirection,'') + ']',
+         r.XUserInserted, r.XDateInserted, r.XUserUpdated, r.XDateUpdated
+    FROM DPRSystemMappingRule r JOIN DPRSystemMap m ON m.UID_DPRSystemMap = r.UID_DPRSystemMap WHERE m.UID_DPRShell = @sh
+  UNION ALL
+  SELECT 'Workflow', p.Name, p.ProjectionDirection, p.XUserInserted, p.XDateInserted, p.XUserUpdated, p.XDateUpdated
+    FROM DPRProjectionConfig p WHERE p.UID_DPRShell = @sh
+  UNION ALL
+  SELECT 'WorkflowStep', p.Name + ' / ' + s.Name, CASE WHEN s.IsDeactivated = 1 THEN 'DEACTIVATED' ELSE '' END,
+         s.XUserInserted, s.XDateInserted, s.XUserUpdated, s.XDateUpdated
+    FROM DPRProjectionConfigStep s JOIN DPRProjectionConfig p ON p.UID_DPRProjectionConfig = s.UID_DPRProjectionConfig WHERE p.UID_DPRShell = @sh
+  UNION ALL
+  SELECT 'SchemaClass', sc.Name + ' / ' + c.Name, c.Filter, c.XUserInserted, c.XDateInserted, c.XUserUpdated, c.XDateUpdated
+    FROM DPRSchemaClass c JOIN DPRSchemaType t ON t.UID_DPRSchemaType = c.UID_DPRSchemaType
+    JOIN DPRSchema sc ON sc.UID_DPRSchema = t.UID_DPRSchema WHERE sc.UID_DPRShell = @sh
+  UNION ALL
+  SELECT 'SchemaProperty', sc.Name + ' / ' + t.Name + '.' + p.Name, CASE WHEN p.IsVirtual = 1 THEN 'VIRTUAL' ELSE '' END,
+         p.XUserInserted, p.XDateInserted, p.XUserUpdated, p.XDateUpdated
+    FROM DPRSchemaProperty p JOIN DPRSchemaType t ON t.UID_DPRSchemaType = p.UID_DPRSchemaType
+    JOIN DPRSchema sc ON sc.UID_DPRSchema = t.UID_DPRSchema WHERE sc.UID_DPRShell = @sh
+  UNION ALL
+  SELECT 'ScopeFilter', f.DisplayName, LEFT(f.Filter, 400), f.XUserInserted, f.XDateInserted, f.XUserUpdated, f.XDateUpdated
+    FROM DPRSystemScopeFilter f JOIN DPRSystemScope s ON s.UID_DPRSystemScope = f.UID_DPRSystemScope WHERE s.UID_DPRShell = @sh
+  UNION ALL
+  SELECT 'Variable', vs.Name + ' / ' + v.Name, CASE WHEN v.IsSecret = 1 THEN '***' ELSE LEFT(v.Value, 200) END,
+         v.XUserInserted, v.XDateInserted, v.XUserUpdated, v.XDateUpdated
+    FROM DPRSystemVariable v JOIN DPRSystemVariableSet vs ON vs.UID_DPRSystemVariableSet = v.UID_DPRSystemVariableSet WHERE vs.UID_DPRShell = @sh
+  UNION ALL
+  SELECT 'StartConfig', si.Name, NULL, si.XUserInserted, si.XDateInserted, si.XUserUpdated, si.XDateUpdated
+    FROM DPRProjectionStartInfo si WHERE si.UID_DPRShell = @sh
+)
+SELECT Obj, Item, Detail,
+       CASE WHEN DI > @cut THEN 'ADDED' ELSE 'CHANGED' END AS Kind,
+       CASE WHEN DI > @cut THEN UI ELSE UU END AS ByUser,
+       CASE WHEN DI > @cut THEN DI ELSE DU END AS AtDate,
+       CASE WHEN (CASE WHEN DI > @cut THEN UI ELSE UU END) = 'sa'
+              OR (CASE WHEN DI > @cut THEN UI ELSE UU END) LIKE 'QBM[_]%' THEN 'patch/upgrade?' ELSE 'person' END AS Source
+FROM x
+WHERE DI > @cut OR DU > @cut
+ORDER BY Source DESC, Obj, AtDate;
+
+/* ---------- PART 2: usual places for customizations, regardless of date ---------- */
+-- 2a  Mapping rules with a condition or a non-standard rule type (script rules, etc.)
+--     The template ships some of these too (about 20 in an AD project): compare, don't assume
+SELECT m.Name AS Mapping, r.Name AS RuleName, ct.FullTypeName AS RuleType,
+       r.PropertyLeft, r.PropertyRight, r.MappingDirection, r.MappingCondition,
+       r.DoNotOverrideLeft, r.DoNotOverrideRight, r.IsKeyRule
+FROM DPRSystemMappingRule r
+JOIN DPRSystemMap m ON m.UID_DPRSystemMap = r.UID_DPRSystemMap
+LEFT JOIN QBMClrType ct ON ct.UID_QBMClrType = r.UID_QBMClrType
+WHERE m.UID_DPRShell = @sh
+  AND (ISNULL(r.MappingCondition,'') <> ''
+       OR ct.FullTypeName NOT IN ('VI.Projector.Mapping.Rules.SinglePropertyComparisonRule',
+                                  'VI.Projector.Mapping.Rules.MembersRule'))
+ORDER BY m.Name, r.Name;
+
+-- 2b  Virtual schema properties added after creation, and anything named CCC*
+--     (the wizard itself creates ~300 virtual properties, so those are filtered out)
+SELECT sc.Name AS SchemaSide, t.Name AS SchemaType, p.Name AS Property, ct.FullTypeName AS PropertyType,
+       p.XUserInserted, p.XDateInserted
+FROM DPRSchemaProperty p
+JOIN DPRSchemaType t ON t.UID_DPRSchemaType = p.UID_DPRSchemaType
+JOIN DPRSchema sc ON sc.UID_DPRSchema = t.UID_DPRSchema
+LEFT JOIN QBMClrType ct ON ct.UID_QBMClrType = p.UID_QBMClrType
+WHERE sc.UID_DPRShell = @sh AND ((p.IsVirtual = 1 AND p.XDateInserted > @cut) OR p.Name LIKE 'CCC%')
+ORDER BY sc.Name, t.Name, p.Name;
+
+-- 2c  Non-system variables (anything not CP_* is usually hand-made)
+SELECT vs.Name AS VariableSet, v.Name, CASE WHEN v.IsSecret = 1 THEN '***' ELSE LEFT(v.Value,200) END AS Value,
+       v.IsSecret, v.GenerateValueScript
+FROM DPRSystemVariable v JOIN DPRSystemVariableSet vs ON vs.UID_DPRSystemVariableSet = v.UID_DPRSystemVariableSet
+WHERE vs.UID_DPRShell = @sh AND v.IsSystemVariable = 0 AND v.Name NOT LIKE 'CP[_]%'
+ORDER BY vs.Name, v.Name;
+
+-- 2d  Workflow steps that are deactivated or have rule white/black lists
+SELECT p.Name AS Workflow, s.Name AS Step, s.IsDeactivated, s.ProjectionDirection, s.RuleWhiteList, s.RuleBlackList
+FROM DPRProjectionConfigStep s JOIN DPRProjectionConfig p ON p.UID_DPRProjectionConfig = s.UID_DPRProjectionConfig
+WHERE p.UID_DPRShell = @sh AND (s.IsDeactivated = 1 OR ISNULL(s.RuleWhiteList,'') <> '' OR ISNULL(s.RuleBlackList,'') <> '')
+ORDER BY p.Name, s.Sequence;
+
+-- 2e  Scope filters (full list - compare with what the wizard would create)
+SELECT f.DisplayName, f.Filter, f.XUserInserted, f.XDateInserted, f.XUserUpdated, f.XDateUpdated
+FROM DPRSystemScopeFilter f JOIN DPRSystemScope s ON s.UID_DPRSystemScope = f.UID_DPRSystemScope
+WHERE s.UID_DPRShell = @sh ORDER BY f.DisplayName;
