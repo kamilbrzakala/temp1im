@@ -1,15 +1,11 @@
-UPDATE JobQueue
-SET Ready2EXE = 'DELETE', XDateUpdated = GETUTCDATE(), XUserUpdated = 'manual'
-WHERE Queue = 'QBM_PWorkMaintenance' AND Ready2EXE = 'TRUE'
-  AND ParamIN LIKE '%sp_updatestats%';
+SELECT d.owner_sid                 AS ServerSideOwnerSid,
+       SUSER_SNAME(d.owner_sid)    AS ServerSideOwner,
+       p.sid                       AS DboSidInDatabase,
+       SUSER_SNAME(p.sid)          AS DboMapsToLogin,
+       CASE WHEN d.owner_sid = p.sid THEN 'MATCH' ELSE 'MISMATCH' END AS Result
+FROM sys.databases d
+CROSS JOIN sys.database_principals p
+WHERE d.name = DB_NAME() AND p.name = 'dbo';
 
 
-SELECT name, SUSER_SNAME(owner_sid) AS OwnerLogin, owner_sid
-FROM sys.databases WHERE name = DB_NAME();
-
-EXECUTE AS USER = 'dbo';
-SELECT USER_NAME() AS DbUser, IS_MEMBER('db_owner') AS IsDbOwner,
-       IS_SRVROLEMEMBER('sysadmin') AS IsSysadmin;
-REVERT;
-
-SELECT SUBSTRING(OBJECT_DEFINITION(OBJECT_ID('sys.sp_updatestats')), 1, 1500) AS CheckCode;
+ALTER AUTHORIZATION ON DATABASE::D1IM TO [sa];   -- or a dedicated service/owner login
