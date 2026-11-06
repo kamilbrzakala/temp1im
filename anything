@@ -1,24 +1,18 @@
-SELECT SUSER_SNAME() AS Me, IS_SRVROLEMEMBER('sysadmin') AS IsSysadmin;
-
-
-USE master;
-ALTER AUTHORIZATION ON DATABASE::D1IM TO [sa];
-
-
-USE D1IM;
-SELECT SUSER_SNAME(d.owner_sid) AS ServerSideOwner, SUSER_SNAME(p.sid) AS DboMapsToLogin,
-       CASE WHEN d.owner_sid = p.sid THEN 'MATCH' ELSE 'MISMATCH' END AS Result
-FROM sys.databases d CROSS JOIN sys.database_principals p
-WHERE d.name = DB_NAME() AND p.name = 'dbo';
-
-
-UPDATE q SET Ready2EXE = 'DELETE', XDateUpdated = GETUTCDATE(), XUserUpdated = 'manual'
+-- the job at the front of the line
+SELECT TOP 3 q.UID_Job, q.StartAt,
+       SQLStmt = (SELECT TOP 1 x.ParameterValue FROM dbo.QBM_FCVJobParameterToList(q.ParamIN) x WHERE x.ParameterName = 'SQLStmt')
 FROM JobQueue q
-WHERE q.Queue = 'QBM_PWorkMaintenance' AND q.Ready2EXE = 'TRUE'
-  AND q.ParamIN LIKE '%sp_updatestats%'
-  AND q.UID_Job <> (SELECT TOP 1 UID_Job FROM JobQueue
-                    WHERE Queue = 'QBM_PWorkMaintenance' AND Ready2EXE = 'TRUE'
-                      AND ParamIN LIKE '%sp_updatestats%' ORDER BY StartAt);
+WHERE q.Queue = 'QBM_PWorkMaintenance' AND q.IsRootJob = 1 AND q.Ready2EXE = 'TRUE'
+ORDER BY q.StartAt;
 
-
-SELECT COUNT(*) AS Waiting FROM JobQueue WHERE Queue = 'QBM_PWorkMaintenance' AND Ready2EXE = 'TRUE';
+-- run the worker once and read the hidden error
+DECLARE @t datetime2 = SYSDATETIME();
+BEGIN TRY
+    EXEC QBM_PWorkMaintenance;
+    PRINT 'Finished OK';
+END TRY
+BEGIN CATCH
+    SELECT dbo.QBM_FGISessionErrorForLog() AS RealError;
+END CATCH
+SELECT DATEDIFF(second, @t, SYSDATETIME()) AS Seconds,
+       (SELECT COUNT(*) FROM JobQueue WHERE Queue = 'QBM_PWorkMaintenance' AND Ready2EXE = 'TRUE') AS Waiting;
