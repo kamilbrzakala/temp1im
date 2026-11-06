@@ -1,18 +1,12 @@
--- the job at the front of the line
-SELECT TOP 3 q.UID_Job, q.StartAt,
-       SQLStmt = (SELECT TOP 1 x.ParameterValue FROM dbo.QBM_FCVJobParameterToList(q.ParamIN) x WHERE x.ParameterName = 'SQLStmt')
-FROM JobQueue q
-WHERE q.Queue = 'QBM_PWorkMaintenance' AND q.IsRootJob = 1 AND q.Ready2EXE = 'TRUE'
-ORDER BY q.StartAt;
-
--- run the worker once and read the hidden error
-DECLARE @t datetime2 = SYSDATETIME();
+EXECUTE AS LOGIN = 'FHLBC\sysIDM_p';
+SELECT SUSER_SNAME() AS RunningAs, IS_ROLEMEMBER('db_owner') AS IsDbOwner;
 BEGIN TRY
     EXEC QBM_PWorkMaintenance;
-    PRINT 'Finished OK';
+    PRINT 'Finished OK as agent';
 END TRY
 BEGIN CATCH
     SELECT dbo.QBM_FGISessionErrorForLog() AS RealError;
 END CATCH
-SELECT DATEDIFF(second, @t, SYSDATETIME()) AS Seconds,
+REVERT;
+SELECT SUSER_SNAME() AS BackTo,
        (SELECT COUNT(*) FROM JobQueue WHERE Queue = 'QBM_PWorkMaintenance' AND Ready2EXE = 'TRUE') AS Waiting;
