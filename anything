@@ -1,19 +1,17 @@
-SELECT OBJECT_NAME(object_id) AS Proc_, last_execution_time, execution_count
-FROM sys.dm_exec_procedure_stats
-WHERE database_id = DB_ID() AND OBJECT_NAME(object_id) LIKE 'QBM_PWork%'
-ORDER BY last_execution_time DESC;
-
-SELECT COUNT(*) AS Waiting FROM JobQueue WHERE Queue = 'QBM_PWorkMaintenance' AND Ready2EXE = 'TRUE';
-
-
-DECLARE @t datetime2 = SYSDATETIME();
 BEGIN TRY
     EXEC QBM_PWorkMaintenance;
     PRINT 'Finished OK';
 END TRY
 BEGIN CATCH
-    SELECT ERROR_NUMBER() AS ErrNo, ERROR_MESSAGE() AS ErrMsg, ERROR_PROCEDURE() AS ErrProc, ERROR_LINE() AS ErrLine;
+    SELECT dbo.QBM_FGISessionErrorForLog() AS RealError;
 END CATCH
-SELECT DATEDIFF(second, @t, SYSDATETIME()) AS Seconds;
 
-SELECT COUNT(*) AS Waiting FROM JobQueue WHERE Queue = 'QBM_PWorkMaintenance' AND Ready2EXE = 'TRUE';
+
+BEGIN TRY
+    EXEC QBM_PWorkMaintenance;
+END TRY
+BEGIN CATCH
+    DECLARE @e nvarchar(max) = dbo.QBM_FGISessionErrorForLog();
+    PRINT @e;
+    SELECT @e AS RealError;
+END CATCH
