@@ -111,3 +111,32 @@ CLOSE c; DEALLOCATE c;
 --     Index rebuild / row-lock settings will be requested again by the next maintenance schedule.
 -- UPDATE JobQueue SET Ready2EXE = 'DELETE', XDateUpdated = GETUTCDATE(), XUserUpdated = 'manual'
 --  WHERE Queue = 'QBM_PWorkMaintenance' AND Ready2EXE IN ('TRUE','FALSE','FROZEN');
+
+/* =====================================================================
+   8. CASE 2026-11-06: head of line = "execute as user='dbo'; exec sp_updatestats; revert;"
+      (created by QBM_ZUpdateStatistics; duplicates pile up because the
+       dedup LIKE in QBM_PJobCreate_Mnt does not match the CR/LF/TAB text)
+   ===================================================================== */
+
+-- 8a. Confirm: is QBM_PWorkMaintenance called repeatedly and cut off?
+--     last_elapsed_time ~ constant (= agent command timeout) and no progress = cancelled by the client.
+SELECT OBJECT_NAME(ps.object_id) AS Proc_, ps.cached_time, ps.last_execution_time, ps.execution_count,
+       last_elapsed_s = ps.last_elapsed_time / 1000000.0, max_elapsed_s = ps.max_elapsed_time / 1000000.0
+FROM sys.dm_exec_procedure_stats ps
+WHERE ps.database_id = DB_ID() AND OBJECT_NAME(ps.object_id) IN ('QBM_PWorkMaintenance','QBM_PWorkDBQueueMain','QBM_PWorkSchedule');
+
+-- 8b. Broader journal check (any error since the head job appeared; MessageDate = UTC)
+SELECT TOP 100 MessageDate, MessageType, LEFT(MessageString, 1000) AS Msg
+FROM DialogJournal
+WHERE MessageDate > '2026-11-05T12:00' AND MessageType IN ('E','W')
+ORDER BY MessageDate DESC;
+
+-- 8c. Fix: run statistics once yourself (time it), then retire the duplicate jobs.
+-- exec sp_updatestats;     -- or your DBA's statistics job
+-- UPDATE q SET Ready2EXE = 'DELETE', XDateUpdated = GETUTCDATE(), XUserUpdated = 'manual'
+-- FROM JobQueue q
+-- WHERE q.Queue = 'QBM_PWorkMaintenance' AND q.Ready2EXE = 'TRUE'
+--   AND q.ParamIN LIKE '%sp_updatestats%';
+
+-- 8d. Watch the rest drain (run every few minutes)
+-- SELECT COUNT(*) FROM JobQueue WHERE Queue = 'QBM_PWorkMaintenance' AND Ready2EXE = 'TRUE';
