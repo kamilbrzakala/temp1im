@@ -128,7 +128,7 @@ WHERE ps.database_id = DB_ID() AND OBJECT_NAME(ps.object_id) IN ('QBM_PWorkMaint
 -- 8b. Broader journal check (any error since the head job appeared; MessageDate = UTC)
 SELECT TOP 100 MessageDate, MessageType, LEFT(MessageString, 1000) AS Msg
 FROM DialogJournal
-WHERE MessageDate > '2026-11-05T12:00' AND MessageType IN ('E','W')
+WHERE MessageDate > CONVERT(datetime, '20261105 12:00:00', 112) AND MessageType IN ('E','W')
 ORDER BY MessageDate DESC;
 
 -- 8c. Fix: run statistics once yourself (time it), then retire the duplicate jobs.
@@ -140,3 +140,36 @@ ORDER BY MessageDate DESC;
 
 -- 8d. Watch the rest drain (run every few minutes)
 -- SELECT COUNT(*) FROM JobQueue WHERE Queue = 'QBM_PWorkMaintenance' AND Ready2EXE = 'TRUE';
+
+/* =====================================================================
+   9. Result of 8a (2026-11-06): QBM_PWorkMaintenance ran ~1/min, each call
+      0.01-0.13 s, LAST call 11/6 08:20:41 (QBM_PWorkSchedule too).
+      -> (A) the agent stopped calling at 08:20, and
+         (B) before that every call ended in milliseconds although jobs were waiting
+             = early exit or instant error, NOT a long sp_updatestats.
+   ===================================================================== */
+
+-- 9a. Is DBQueue processing also dead since 08:20? (compare twice, a few minutes apart)
+SELECT ToProcess = COUNT(*), Newest = MAX(XDateInserted) FROM DialogDBQueue;
+SELECT OBJECT_NAME(ps.object_id) AS Proc_, ps.last_execution_time, ps.execution_count
+FROM sys.dm_exec_procedure_stats ps
+WHERE ps.database_id = DB_ID() AND OBJECT_NAME(ps.object_id) LIKE 'QBM_PWork%'
+ORDER BY ps.last_execution_time DESC;
+
+-- 9b. Login the Database Agent uses
+SELECT DISTINCT login_name, original_login_name, host_name, program_name
+FROM sys.dm_exec_sessions WHERE program_name LIKE '%DatabaseAgent%';
+
+-- 9c. Reproduce what the agent does, as the agent's login, and read the error.
+--     Uses the head statement only (fast to fail if it is a permission problem).
+-- EXECUTE AS LOGIN = '<login_name from 9b>';
+-- SET LOCK_TIMEOUT 1000;
+-- EXEC sp_executesql N'execute as user = ''dbo''; exec sp_updatestats; revert;';
+-- REVERT;
+
+-- 9d. Early-exit checks of QBM_PWorkMaintenance
+SELECT dbo.QBM_FGIDBQueueActivityDisabled() AS ActivityDisabled;   -- must be 0
+SELECT v.n, Present = CASE WHEN o.name IS NULL THEN 0 ELSE 1 END
+FROM (VALUES ('QBMModuleDef'),('JobQueue'),('QBM_FCVJobParameterToList'),('QBM_PSessionErrorAdd'),
+             ('QBM_FGIDBQueueActivityDisabled'),('QBM_PJournal'),('QBM_PTransactionLevelCheck')) v(n)
+LEFT JOIN sys.objects o ON o.name = v.n;                              -- all must be 1
