@@ -1,175 +1,19 @@
-/* =====================================================================
-   OIM v9.x  -  JobQueue "Execute SQL" jobs in queue QBM_PWorkMaintenance
-   (QBM_PIndexRebuild / QBM_PSetRowLockOnly / statistics ...)
+SELECT OBJECT_NAME(object_id) AS Proc_, last_execution_time, execution_count
+FROM sys.dm_exec_procedure_stats
+WHERE database_id = DB_ID() AND OBJECT_NAME(object_id) LIKE 'QBM_PWork%'
+ORDER BY last_execution_time DESC;
 
-   How they work:
-   - Created by QBM_PJobCreate_Mnt, called from the maintenance tasks
-     QBM_ZIndexRebuild, QBM_ZSetRowLockOnly_2, QBM_ZUpdateStatistics,
-     QBM_ZTableStatistics, QBM_ZColumnCheckBlobExternal, QBM_ZTableRevisionFill.
-   - NO Job Service executes them. "QBM_PWorkMaintenance" is a pseudo-queue
-     (blocked for real QBMServer.QueueName). The Database Agent calls
-     proc QBM_PWorkMaintenance, which:
-       * stops at once if DialogDatabase.IsDBSchedulerDisabled = 1 or SingleUserProcess > 0
-       * takes TOP 500 Ready2EXE='TRUE' jobs ORDER BY StartAt
-       * runs them one by one for max 59 s, with LOCK_TIMEOUT 1000 ms
-       * on success sets Ready2EXE='DELETE' (QBM_PWorkJobQueueDelete removes it)
-       * on ANY non-deadlock error RAISES and aborts the whole run
-         -> the same failing job is first again next time = head-of-line block.
-   Run section by section. Sections 1-6 only read.
-   ===================================================================== */
+SELECT COUNT(*) AS Waiting FROM JobQueue WHERE Queue = 'QBM_PWorkMaintenance' AND Ready2EXE = 'TRUE';
 
--- 1. Volume: what is waiting, per statement type
-SELECT  Stmt = LEFT(p.SQLStmt, CHARINDEX(' ', p.SQLStmt + ' ', 6)) ,
-        q.Ready2EXE, Cnt = COUNT(*),
-        OldestStartAt = MIN(q.StartAt), NewestIns = MAX(q.XDateInserted),
-        WithErr = SUM(CASE WHEN ISNULL(q.ErrorMessages,'') <> '' THEN 1 ELSE 0 END)
-FROM JobQueue q
-CROSS APPLY (SELECT SQLStmt = (SELECT TOP 1 x.ParameterValue FROM dbo.QBM_FCVJobParameterToList(q.ParamIN) x
-                               WHERE x.ParameterName = 'SQLStmt')) p
-WHERE q.Queue = 'QBM_PWorkMaintenance'
-GROUP BY LEFT(p.SQLStmt, CHARINDEX(' ', p.SQLStmt + ' ', 6)), q.Ready2EXE
-ORDER BY Cnt DESC;
 
--- 2. The head of the line = the job the agent tries first every run.
---    If this one never disappears, it is the blocker. Note its SQLStmt.
-SELECT TOP 10 q.UID_Job, q.StartAt, q.XDateInserted, q.Ready2EXE, q.Retries, q.ErrorMessages,
-       SQLStmt = (SELECT TOP 1 x.ParameterValue FROM dbo.QBM_FCVJobParameterToList(q.ParamIN) x WHERE x.ParameterName = 'SQLStmt')
-FROM JobQueue q
-WHERE q.Queue = 'QBM_PWorkMaintenance' AND q.IsRootJob = 1 AND q.Ready2EXE = 'TRUE'
-ORDER BY q.StartAt;
+DECLARE @t datetime2 = SYSDATETIME();
+BEGIN TRY
+    EXEC QBM_PWorkMaintenance;
+    PRINT 'Finished OK';
+END TRY
+BEGIN CATCH
+    SELECT ERROR_NUMBER() AS ErrNo, ERROR_MESSAGE() AS ErrMsg, ERROR_PROCEDURE() AS ErrProc, ERROR_LINE() AS ErrLine;
+END CATCH
+SELECT DATEDIFF(second, @t, SYSDATETIME()) AS Seconds;
 
--- 3. Is the agent working on it at all? ServerProcess = spid while running, 0 when idle.
-SELECT a.Ident_QBMDBQueueAgent, a.ServerProcess,
-       s.program_name, s.status, s.last_request_start_time, r.command, r.wait_type,
-       r.wait_time, r.blocking_session_id, r.percent_complete
-FROM QBMDBQueueAgent a
-LEFT JOIN sys.dm_exec_sessions s ON s.session_id = a.ServerProcess AND a.ServerProcess > 0
-LEFT JOIN sys.dm_exec_requests r ON r.session_id = a.ServerProcess AND a.ServerProcess > 0;
-
--- Database Agent sessions in general
-SELECT session_id, program_name, host_name, status, login_time, last_request_start_time
-FROM sys.dm_exec_sessions WHERE program_name LIKE '%DatabaseAgent%' OR program_name LIKE '%DBQueue%';
-
--- 4. Global switches. Any of these true -> QBM_PWorkMaintenance does nothing.
-SELECT IsDBSchedulerDisabled, SingleUserProcess, UpdatePhase, UID_CutOffTask
-FROM DialogDatabase WHERE IsMainDatabase = 1;
-SELECT * FROM QBMVSystemState;   -- e.g. "Database waiting for compilation"
-
--- 5. Errors from the agent (MessageDate is UTC)
-SELECT TOP 50 MessageDate, MessageType, LEFT(MessageString, 2000) AS Msg
-FROM DialogJournal
-WHERE MessageDate > DATEADD(day, -3, GETUTCDATE())
-  AND (MessageString LIKE '%PWorkMaintenance%' OR MessageString LIKE '%IndexRebuild%'
-    OR MessageString LIKE '%SetRowLockOnly%' OR MessageString LIKE '%Lock request time out%'
-    OR MessageString LIKE '%1222%')
-ORDER BY MessageDate DESC;
-
--- 6. Who is holding locks on the table of the head job (replace UNSRootB)
-SELECT l.request_session_id, s.program_name, s.host_name, l.request_mode, l.request_status
-FROM sys.dm_tran_locks l
-JOIN sys.dm_exec_sessions s ON s.session_id = l.request_session_id
-WHERE l.resource_type = 'OBJECT' AND l.resource_associated_entity_id = OBJECT_ID('UNSRootB');
-
-/* =====================================================================
-   7. UNBLOCK  (outside business hours, after a DB backup)
-   ===================================================================== */
-
--- 7a. Run the head job by hand WITHOUT the 1 s lock timeout and see the real error.
---     If it works, mark it done the same way the agent does:
--- SET LOCK_TIMEOUT -1;
--- exec QBM_PIndexRebuild 'UNSRootB';
--- UPDATE JobQueue SET Ready2EXE = 'DELETE', XDateUpdated = GETUTCDATE(), XUserUpdated = 'manual'
---  WHERE UID_Job = '<UID_Job from section 2>';
-
--- 7b. Drain the backlog by hand (same logic as QBM_PWorkMaintenance, but no 59 s / 1 s limits,
---     and it skips a failing job instead of aborting). Prints failures.
-/*
-SET LOCK_TIMEOUT 30000;
-DECLARE @uid varchar(38), @cmd nvarchar(max);
-DECLARE c CURSOR LOCAL FAST_FORWARD FOR
-  SELECT q.UID_Job, (SELECT TOP 1 x.ParameterValue FROM dbo.QBM_FCVJobParameterToList(q.ParamIN) x WHERE x.ParameterName = 'SQLStmt')
-  FROM JobQueue q
-  WHERE q.Queue = 'QBM_PWorkMaintenance' AND q.IsRootJob = 1 AND q.Ready2EXE = 'TRUE'
-    AND q.ComponentClass = 'VI.JobService.JobComponents.SQLComponent' AND q.TaskName = 'Execute SQL'
-  ORDER BY q.StartAt;
-OPEN c; FETCH NEXT FROM c INTO @uid, @cmd;
-WHILE @@FETCH_STATUS = 0
-BEGIN
-  BEGIN TRY
-    EXEC sp_executesql @cmd;
-    UPDATE JobQueue SET Ready2EXE = 'DELETE', XDateUpdated = GETUTCDATE(), XUserUpdated = 'manual' WHERE UID_Job = @uid;
-  END TRY
-  BEGIN CATCH
-    PRINT CONCAT('FAILED ', @uid, ' : ', @cmd, ' -> ', ERROR_NUMBER(), ' ', ERROR_MESSAGE());
-  END CATCH
-  FETCH NEXT FROM c INTO @uid, @cmd;
-END
-CLOSE c; DEALLOCATE c;
-*/
-
--- 7c. If you only want them gone (no index rebuild now): let the delete agent remove them.
---     Index rebuild / row-lock settings will be requested again by the next maintenance schedule.
--- UPDATE JobQueue SET Ready2EXE = 'DELETE', XDateUpdated = GETUTCDATE(), XUserUpdated = 'manual'
---  WHERE Queue = 'QBM_PWorkMaintenance' AND Ready2EXE IN ('TRUE','FALSE','FROZEN');
-
-/* =====================================================================
-   8. CASE 2026-11-06: head of line = "execute as user='dbo'; exec sp_updatestats; revert;"
-      (created by QBM_ZUpdateStatistics; duplicates pile up because the
-       dedup LIKE in QBM_PJobCreate_Mnt does not match the CR/LF/TAB text)
-   ===================================================================== */
-
--- 8a. Confirm: is QBM_PWorkMaintenance called repeatedly and cut off?
---     last_elapsed_time ~ constant (= agent command timeout) and no progress = cancelled by the client.
-SELECT OBJECT_NAME(ps.object_id) AS Proc_, ps.cached_time, ps.last_execution_time, ps.execution_count,
-       last_elapsed_s = ps.last_elapsed_time / 1000000.0, max_elapsed_s = ps.max_elapsed_time / 1000000.0
-FROM sys.dm_exec_procedure_stats ps
-WHERE ps.database_id = DB_ID() AND OBJECT_NAME(ps.object_id) IN ('QBM_PWorkMaintenance','QBM_PWorkDBQueueMain','QBM_PWorkSchedule');
-
--- 8b. Broader journal check (any error since the head job appeared; MessageDate = UTC)
-SELECT TOP 100 MessageDate, MessageType, LEFT(MessageString, 1000) AS Msg
-FROM DialogJournal
-WHERE MessageDate > CONVERT(datetime, '20261105 12:00:00', 112) AND MessageType IN ('E','W')
-ORDER BY MessageDate DESC;
-
--- 8c. Fix: run statistics once yourself (time it), then retire the duplicate jobs.
--- exec sp_updatestats;     -- or your DBA's statistics job
--- UPDATE q SET Ready2EXE = 'DELETE', XDateUpdated = GETUTCDATE(), XUserUpdated = 'manual'
--- FROM JobQueue q
--- WHERE q.Queue = 'QBM_PWorkMaintenance' AND q.Ready2EXE = 'TRUE'
---   AND q.ParamIN LIKE '%sp_updatestats%';
-
--- 8d. Watch the rest drain (run every few minutes)
--- SELECT COUNT(*) FROM JobQueue WHERE Queue = 'QBM_PWorkMaintenance' AND Ready2EXE = 'TRUE';
-
-/* =====================================================================
-   9. Result of 8a (2026-11-06): QBM_PWorkMaintenance ran ~1/min, each call
-      0.01-0.13 s, LAST call 11/6 08:20:41 (QBM_PWorkSchedule too).
-      -> (A) the agent stopped calling at 08:20, and
-         (B) before that every call ended in milliseconds although jobs were waiting
-             = early exit or instant error, NOT a long sp_updatestats.
-   ===================================================================== */
-
--- 9a. Is DBQueue processing also dead since 08:20? (compare twice, a few minutes apart)
-SELECT ToProcess = COUNT(*), Newest = MAX(XDateInserted) FROM DialogDBQueue;
-SELECT OBJECT_NAME(ps.object_id) AS Proc_, ps.last_execution_time, ps.execution_count
-FROM sys.dm_exec_procedure_stats ps
-WHERE ps.database_id = DB_ID() AND OBJECT_NAME(ps.object_id) LIKE 'QBM_PWork%'
-ORDER BY ps.last_execution_time DESC;
-
--- 9b. Login the Database Agent uses
-SELECT DISTINCT login_name, original_login_name, host_name, program_name
-FROM sys.dm_exec_sessions WHERE program_name LIKE '%DatabaseAgent%';
-
--- 9c. Reproduce what the agent does, as the agent's login, and read the error.
---     Uses the head statement only (fast to fail if it is a permission problem).
--- EXECUTE AS LOGIN = '<login_name from 9b>';
--- SET LOCK_TIMEOUT 1000;
--- EXEC sp_executesql N'execute as user = ''dbo''; exec sp_updatestats; revert;';
--- REVERT;
-
--- 9d. Early-exit checks of QBM_PWorkMaintenance
-SELECT dbo.QBM_FGIDBQueueActivityDisabled() AS ActivityDisabled;   -- must be 0
-SELECT v.n, Present = CASE WHEN o.name IS NULL THEN 0 ELSE 1 END
-FROM (VALUES ('QBMModuleDef'),('JobQueue'),('QBM_FCVJobParameterToList'),('QBM_PSessionErrorAdd'),
-             ('QBM_FGIDBQueueActivityDisabled'),('QBM_PJournal'),('QBM_PTransactionLevelCheck')) v(n)
-LEFT JOIN sys.objects o ON o.name = v.n;                              -- all must be 1
+SELECT COUNT(*) AS Waiting FROM JobQueue WHERE Queue = 'QBM_PWorkMaintenance' AND Ready2EXE = 'TRUE';
