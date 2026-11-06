@@ -1,11 +1,24 @@
-SELECT d.owner_sid                 AS ServerSideOwnerSid,
-       SUSER_SNAME(d.owner_sid)    AS ServerSideOwner,
-       p.sid                       AS DboSidInDatabase,
-       SUSER_SNAME(p.sid)          AS DboMapsToLogin,
+SELECT SUSER_SNAME() AS Me, IS_SRVROLEMEMBER('sysadmin') AS IsSysadmin;
+
+
+USE master;
+ALTER AUTHORIZATION ON DATABASE::D1IM TO [sa];
+
+
+USE D1IM;
+SELECT SUSER_SNAME(d.owner_sid) AS ServerSideOwner, SUSER_SNAME(p.sid) AS DboMapsToLogin,
        CASE WHEN d.owner_sid = p.sid THEN 'MATCH' ELSE 'MISMATCH' END AS Result
-FROM sys.databases d
-CROSS JOIN sys.database_principals p
+FROM sys.databases d CROSS JOIN sys.database_principals p
 WHERE d.name = DB_NAME() AND p.name = 'dbo';
 
 
-ALTER AUTHORIZATION ON DATABASE::D1IM TO [sa];   -- or a dedicated service/owner login
+UPDATE q SET Ready2EXE = 'DELETE', XDateUpdated = GETUTCDATE(), XUserUpdated = 'manual'
+FROM JobQueue q
+WHERE q.Queue = 'QBM_PWorkMaintenance' AND q.Ready2EXE = 'TRUE'
+  AND q.ParamIN LIKE '%sp_updatestats%'
+  AND q.UID_Job <> (SELECT TOP 1 UID_Job FROM JobQueue
+                    WHERE Queue = 'QBM_PWorkMaintenance' AND Ready2EXE = 'TRUE'
+                      AND ParamIN LIKE '%sp_updatestats%' ORDER BY StartAt);
+
+
+SELECT COUNT(*) AS Waiting FROM JobQueue WHERE Queue = 'QBM_PWorkMaintenance' AND Ready2EXE = 'TRUE';
