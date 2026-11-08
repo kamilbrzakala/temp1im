@@ -1,2 +1,8 @@
-update DialogDatabase set DataOrigin = 0, XDateUpdated = getutcdate(), XUserUpdated = 'Migr92to10'
-where IsMainDatabase = 1;
+update DialogTable set IsModuleGUIDAllowed = 1, XDateUpdated = getutcdate(), XUserUpdated = 'Migr92to10'
+where TableName in ('Person', 'Org', 'PersonInOrg', 'BaseTree', 'PersonInBaseTree')
+  and IsModuleGUIDAllowed = 0;
+
+select TableName, SystemSyncMode, IsModuleGUIDAllowed
+from DialogTable
+where TableName in ('Person', 'Org', 'PersonInOrg', 'BaseTree', 'PersonInBaseTree')
+order by TableName;
