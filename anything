@@ -1,63 +1,7 @@
-/* ===== OIM: jobs "Execute SQL" in queue QBM_PWorkMaintenance stuck on Ready2EXE = TRUE ===== */
-/* They are NOT run by the Job Service. The Database Agent calls EXEC QBM_PWorkMaintenance about once a minute:
-   TOP 500 by StartAt, 59 s window, LOCK_TIMEOUT 1000, first non-deadlock error = whole run aborted (not in DialogJournal). */
-
--- 1) What is waiting
-SELECT LEFT(p.SQLStmt, 40) AS StmtType, COUNT(*) cnt, MIN(q.StartAt) oldest
-FROM JobQueue q
-CROSS APPLY (SELECT TOP 1 x.ParameterValue AS SQLStmt FROM dbo.QBM_FCVJobParameterToList(q.ParamIN) x WHERE x.ParameterName = 'SQLStmt') p
-WHERE q.Queue = 'QBM_PWorkMaintenance' AND q.Ready2EXE = 'TRUE'
-GROUP BY LEFT(p.SQLStmt, 40) ORDER BY cnt DESC;
-
--- 2) Is the agent calling the worker at all? (run twice, 1-2 min apart, compare execution_count)
-SELECT OBJECT_NAME(object_id) proc_name, execution_count, last_execution_time,
-       total_elapsed_time / NULLIF(execution_count,0) / 1000 AS avg_ms
-FROM sys.dm_exec_procedure_stats WHERE database_id = DB_ID() AND OBJECT_NAME(object_id) LIKE 'QBM_PWork%';
-SELECT IsDBSchedulerDisabled, SingleUserProcess FROM DialogDatabase WHERE IsMainDatabase = 1;   -- must be 0 / 0
-
--- 3) Known blocker after DB restore/migration: database owner vs dbo mismatch -> sp_updatestats error 15247
-SELECT SUSER_SNAME(d.owner_sid) AS db_owner_login, SUSER_SNAME(p.sid) AS dbo_maps_to,
-       CASE WHEN d.owner_sid = p.sid THEN 'MATCH' ELSE 'MISMATCH -> ALTER AUTHORIZATION ON DATABASE::<db> TO [sa]' END AS state
-FROM sys.databases d CROSS JOIN sys.database_principals p
-WHERE d.database_id = DB_ID() AND p.name = 'dbo';
-
--- 4) Real error, exactly as the agent sees it (SSMS only; change the login to the agent's service account)
-EXECUTE AS LOGIN = 'FHLBC\sysIDM_p';
-BEGIN TRY EXEC QBM_PWorkMaintenance; SELECT 'run OK' AS Result; END TRY
-BEGIN CATCH SELECT dbo.QBM_FGISessionErrorForLog() AS RealError; END CATCH
-REVERT;
-
--- 5) Push them through by hand: longer lock timeout, skip failures, mark successful jobs DELETE
---    Run as a sysadmin/db_owner in SSMS. Repeat until the count in (1) is 0. Failures are listed at the end.
-SET LOCK_TIMEOUT 30000;
-DECLARE @uid varchar(38), @sql nvarchar(max), @ok int = 0, @fail int = 0;
-DECLARE @failed TABLE (UID_Job varchar(38), SQLStmt nvarchar(max), Err nvarchar(4000));
-DECLARE c CURSOR LOCAL FAST_FORWARD FOR
-  SELECT TOP 200 q.UID_Job, p.SQLStmt
-  FROM JobQueue q
-  CROSS APPLY (SELECT TOP 1 x.ParameterValue AS SQLStmt FROM dbo.QBM_FCVJobParameterToList(q.ParamIN) x WHERE x.ParameterName = 'SQLStmt') p
-  WHERE q.Queue = 'QBM_PWorkMaintenance' AND q.Ready2EXE = 'TRUE' AND q.IsRootJob = 1
-  ORDER BY q.StartAt;
-OPEN c; FETCH NEXT FROM c INTO @uid, @sql;
-WHILE @@FETCH_STATUS = 0
-BEGIN
-  BEGIN TRY
-    EXEC sp_executesql @sql;
-    UPDATE JobQueue SET Ready2EXE = 'DELETE', XDateUpdated = GETUTCDATE(), XUserUpdated = 'ManualPWorkMaintenance' WHERE UID_Job = @uid;
-    SET @ok += 1;
-  END TRY
-  BEGIN CATCH
-    IF @@TRANCOUNT > 0 ROLLBACK;
-    INSERT @failed VALUES (@uid, @sql, CONCAT(ERROR_NUMBER(), ': ', ERROR_MESSAGE()));
-    SET @fail += 1;
-  END CATCH
-  FETCH NEXT FROM c INTO @uid, @sql;
-END
-CLOSE c; DEALLOCATE c;
-SET LOCK_TIMEOUT -1;
-SELECT @ok AS done, @fail AS failed;
-SELECT * FROM @failed;
-
--- 6) A job that keeps failing (e.g. index rebuild on a permanently busy table): mark it DELETE,
---    the next nightly maintenance creates it again.
--- UPDATE JobQueue SET Ready2EXE = 'DELETE' WHERE UID_Job = '<UID_Job from @failed>';
+SELECT r.session_id, r.status, r.command, r.wait_type, r.wait_time, r.blocking_session_id,
+       r.percent_complete, r.total_elapsed_time/1000 AS elapsed_s,
+       SUBSTRING(t.text, r.statement_start_offset/2+1,
+         (CASE WHEN r.statement_end_offset = -1 THEN DATALENGTH(t.text) ELSE r.statement_end_offset END - r.statement_start_offset)/2+1) AS current_stmt
+FROM sys.dm_exec_requests r
+CROSS APPLY sys.dm_exec_sql_text(r.sql_handle) t
+WHERE r.session_id = 113;
