@@ -1,13 +1,2 @@
-select sc.UID_DPRSchemaClass, sc.Name as SchemaClass, sc.XDateInserted, sc.XUserInserted,
-       st.Name as SchemaType, s.UID_DPRSchema, s.Name as SchemaName,
-       sh.UID_DPRShell, sh.DisplayName as Project, sh.XDateInserted as ProjectCreated
-from DPRSchemaClass sc
-    left join DPRSchemaType st on st.UID_DPRSchemaType = sc.UID_DPRSchemaType
-    left join DPRSchema s on s.UID_DPRSchema = st.UID_DPRSchema
-    left join DPRShell sh on sh.UID_DPRShell = s.UID_DPRShell
-where sc.UID_DPRSchemaClass = 'CCC-C71F11597FA56C14043217B78F33EDA1';
-
-
-
-select UID_DPRShell, DisplayName, XDateInserted, XUserInserted
-from DPRShell order by XDateInserted desc;
+update DialogDatabase set DataOrigin = 0, XDateUpdated = getutcdate(), XUserUpdated = 'Migr92to10'
+where IsMainDatabase = 1;
