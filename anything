@@ -1,7 +1,3 @@
-SELECT r.session_id, r.status, r.command, r.wait_type, r.wait_time, r.blocking_session_id,
-       r.percent_complete, r.total_elapsed_time/1000 AS elapsed_s,
-       SUBSTRING(t.text, r.statement_start_offset/2+1,
-         (CASE WHEN r.statement_end_offset = -1 THEN DATALENGTH(t.text) ELSE r.statement_end_offset END - r.statement_start_offset)/2+1) AS current_stmt
-FROM sys.dm_exec_requests r
-CROSS APPLY sys.dm_exec_sql_text(r.sql_handle) t
-WHERE r.session_id = 113;
+SELECT DISTINCT OBJECT_NAME(l.resource_associated_entity_id) AS table_name, l.request_mode
+FROM sys.dm_tran_locks l
+WHERE l.request_session_id = 113 AND l.resource_type = 'OBJECT' AND l.resource_database_id = DB_ID();
