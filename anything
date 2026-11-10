@@ -1,3 +1,139 @@
-SELECT DISTINCT OBJECT_NAME(l.resource_associated_entity_id) AS table_name, l.request_mode
-FROM sys.dm_tran_locks l
-WHERE l.request_session_id = 113 AND l.resource_type = 'OBJECT' AND l.resource_database_id = DB_ID();
+<#
+.SYNOPSIS
+  Copies GitHub repo(s) from one org to another (all branches + tags), keeps the
+  same default branch and visibility (private/internal/public), grants a team a
+  role on the new repo, and verifies everything at the end.
+  The new repo is named poc1-<repo>; if that exists, poc2-<repo>, poc3-<repo>, ...
+  (change the prefix with -Prefix).
+
+.REQUIREMENTS
+  - git and GitHub CLI (gh) installed:  winget install GitHub.cli
+  - Logged in once:  gh auth login   (needs scopes: repo, admin:org)
+  - You must be able to create repos in the target org and admin the new repo.
+
+.EXAMPLE
+  .\Copy-GitHubRepo.ps1 -SourceOrg old-org -TargetOrg new-org -Repo my-service -TeamSlug team-x
+
+.EXAMPLE
+  # several repos in one go
+  .\Copy-GitHubRepo.ps1 -SourceOrg old-org -TargetOrg new-org -Repo repo-a,repo-b,repo-c -TeamSlug team-x
+
+.EXAMPLE
+  # GitHub Enterprise Server + Git LFS content
+  .\Copy-GitHubRepo.ps1 -SourceOrg old-org -TargetOrg new-org -Repo my-service -TeamSlug team-x -GitHubHost github.mycompany.com -IncludeLfs
+#>
+param(
+    [Parameter(Mandatory)][string]$SourceOrg,
+    [Parameter(Mandatory)][string]$TargetOrg,
+    [Parameter(Mandatory)][string[]]$Repo,
+    [Parameter(Mandatory)][string]$TeamSlug,          # team slug as in the URL: /orgs/<org>/teams/<slug>
+    [ValidateSet('pull','triage','push','maintain','admin')]
+    [string]$Permission = 'maintain',
+    [string]$GitHubHost = 'github.com',
+    [string]$Prefix = 'poc',                           # new repo = <Prefix><n>-<repo>, e.g. poc1-my-repo
+    [switch]$IncludeLfs
+)
+
+$ErrorActionPreference = 'Stop'
+$env:GH_HOST = $GitHubHost
+
+function Invoke-Gh {
+    $out = & gh @args
+    if ($LASTEXITCODE -ne 0) { throw "gh $($args -join ' ') failed (exit $LASTEXITCODE)" }
+    return $out
+}
+function Invoke-Git {
+    & git @args
+    if ($LASTEXITCODE -ne 0) { throw "git $($args -join ' ') failed (exit $LASTEXITCODE)" }
+}
+
+# Let git use the gh login for HTTPS clone/push
+& gh auth setup-git --hostname $GitHubHost | Out-Null
+
+$results = @()
+
+foreach ($name in $Repo) {
+    Write-Host "`n=== $SourceOrg/$name  ->  $TargetOrg ===" -ForegroundColor Cyan
+    $tmp = $null
+    $targetName = $null
+    try {
+        # 1. Read source settings
+        $src = Invoke-Gh api "repos/$SourceOrg/$name" | ConvertFrom-Json
+        $defaultBranch = $src.default_branch
+        $visibility    = $src.visibility
+        Write-Host "Source: default branch '$defaultBranch', visibility '$visibility'"
+
+        # 2. Find the first free name: poc1-<repo>, poc2-<repo>, ...
+        $n = 1
+        while ($true) {
+            $targetName = "$Prefix$n-$name"
+            & gh api "repos/$TargetOrg/$targetName" 2>$null | Out-Null
+            if ($LASTEXITCODE -ne 0) { break }      # 404 -> name is free
+            Write-Host "$TargetOrg/$targetName already exists, trying next number..."
+            $n++
+        }
+
+        # 3. Create target repo with the same visibility (empty, no README)
+        Invoke-Gh api -X POST "orgs/$TargetOrg/repos" `
+            -f "name=$targetName" `
+            -f "visibility=$visibility" `
+            -f "description=$($src.description)" | Out-Null
+        Write-Host "Created $TargetOrg/$targetName ($visibility)"
+
+        # 4. Copy all branches and tags.
+        #    --bare (not --mirror) on purpose: --mirror also pulls refs/pull/*,
+        #    which GitHub rejects on push ("deny updating a hidden ref").
+        $tmp = Join-Path ([IO.Path]::GetTempPath()) "repo-copy-$name-$(Get-Random)"
+        $srcUrl = "https://$GitHubHost/$SourceOrg/$name.git"
+        $dstUrl = "https://$GitHubHost/$TargetOrg/$targetName.git"
+        Invoke-Git clone --bare $srcUrl $tmp
+        Invoke-Git -C $tmp push --mirror $dstUrl
+
+        if ($IncludeLfs) {
+            Invoke-Git -C $tmp lfs fetch --all $srcUrl
+            Invoke-Git -C $tmp lfs push --all $dstUrl
+        }
+
+        # 5. Same default branch as the source
+        Invoke-Gh api -X PATCH "repos/$TargetOrg/$targetName" -f "default_branch=$defaultBranch" | Out-Null
+
+        # 6. Team role
+        Invoke-Gh api -X PUT "orgs/$TargetOrg/teams/$TeamSlug/repos/$TargetOrg/$targetName" `
+            -f "permission=$Permission" | Out-Null
+        Write-Host "Granted team '$TeamSlug' -> $Permission"
+
+        # 7. Verify
+        $dst = Invoke-Gh api "repos/$TargetOrg/$targetName" | ConvertFrom-Json
+        $teamRepo = Invoke-Gh api "orgs/$TargetOrg/teams/$TeamSlug/repos/$TargetOrg/$targetName" `
+            -H "Accept: application/vnd.github.v3.repository+json" | ConvertFrom-Json
+        $srcHeads = (& git ls-remote --heads $srcUrl | Measure-Object).Count
+        $dstHeads = (& git ls-remote --heads $dstUrl | Measure-Object).Count
+        $srcTags  = (& git ls-remote --tags  $srcUrl | Measure-Object).Count
+        $dstTags  = (& git ls-remote --tags  $dstUrl | Measure-Object).Count
+
+        $ok = ($dst.default_branch -eq $defaultBranch) -and
+              ($dst.visibility     -eq $visibility) -and
+              ($teamRepo.role_name -eq $Permission) -and
+              ($srcHeads -eq $dstHeads) -and ($srcTags -eq $dstTags)
+
+        $results += [pscustomobject]@{
+            Repo          = "$name -> $targetName"
+            DefaultBranch = "$defaultBranch -> $($dst.default_branch)"
+            Visibility    = "$visibility -> $($dst.visibility)"
+            TeamRole      = "$TeamSlug : $($teamRepo.role_name)"
+            Branches      = "$srcHeads -> $dstHeads"
+            Tags          = "$srcTags -> $dstTags"
+            Result        = $(if ($ok) { 'OK' } else { 'CHECK' })
+        }
+    }
+    catch {
+        Write-Host "ERROR: $_" -ForegroundColor Red
+        $results += [pscustomobject]@{ Repo = "$name -> $targetName"; Result = "FAILED: $_" }
+    }
+    finally {
+        if ($tmp -and (Test-Path $tmp)) { Remove-Item $tmp -Recurse -Force }
+    }
+}
+
+Write-Host "`n=== Summary ===" -ForegroundColor Cyan
+$results | Format-Table -AutoSize -Wrap
