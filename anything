@@ -37,18 +37,41 @@ param(
 $ErrorActionPreference = 'Stop'
 $env:GH_HOST = $GitHubHost
 
+# Windows PowerShell 5.1 turns ANY stderr output of a native program (gh/git)
+# into a terminating error when ErrorActionPreference is 'Stop' - even normal
+# progress messages or an expected 404. So native calls run with 'Continue'
+# locally, stderr is captured separately, and success is judged by exit code only.
+function Invoke-Native {
+    param([string]$Exe, [string[]]$ArgList)
+    $ErrorActionPreference = 'Continue'
+    $all = & $Exe @ArgList 2>&1
+    $err = @($all | Where-Object { $_ -is [System.Management.Automation.ErrorRecord] } | ForEach-Object { "$_" })
+    $out = @($all | Where-Object { $_ -isnot [System.Management.Automation.ErrorRecord] })
+    [pscustomobject]@{ ExitCode = $LASTEXITCODE; Out = ($out -join "`n"); Err = ($err -join "`n") }
+}
 function Invoke-Gh {
-    $out = & gh @args
-    if ($LASTEXITCODE -ne 0) { throw "gh $($args -join ' ') failed (exit $LASTEXITCODE)" }
-    return $out
+    $r = Invoke-Native gh $args
+    if ($r.ExitCode -ne 0) { throw "gh $($args -join ' ') failed: $($r.Err)" }
+    return $r.Out
 }
 function Invoke-Git {
-    & git @args
-    if ($LASTEXITCODE -ne 0) { throw "git $($args -join ' ') failed (exit $LASTEXITCODE)" }
+    $r = Invoke-Native git $args
+    if ($r.ExitCode -ne 0) { throw "git $($args -join ' ') failed: $($r.Err)" }
+    return $r.Out
+}
+function Test-GhRepo([string]$FullName) {
+    $r = Invoke-Native gh @('api', "repos/$FullName")
+    if ($r.ExitCode -eq 0) { return $true }
+    if ($r.Err -match 'HTTP 404') { return $false }
+    throw "Could not check $FullName : $($r.Err)"   # e.g. auth/SSO problem - don't guess
+}
+function Get-RefCount([string]$Url, [string]$Kind) {
+    $out = Invoke-Git ls-remote "--$Kind" $Url
+    return @($out -split "`n" | Where-Object { $_.Trim() }).Count
 }
 
 # Let git use the gh login for HTTPS clone/push
-& gh auth setup-git --hostname $GitHubHost | Out-Null
+Invoke-Gh auth setup-git --hostname $GitHubHost | Out-Null
 
 $results = @()
 
@@ -67,8 +90,7 @@ foreach ($name in $Repo) {
         $n = 1
         while ($true) {
             $targetName = "$Prefix$n-$name"
-            & gh api "repos/$TargetOrg/$targetName" 2>$null | Out-Null
-            if ($LASTEXITCODE -ne 0) { break }      # 404 -> name is free
+            if (-not (Test-GhRepo "$TargetOrg/$targetName")) { break }   # 404 -> name is free
             Write-Host "$TargetOrg/$targetName already exists, trying next number..."
             $n++
         }
@@ -106,10 +128,10 @@ foreach ($name in $Repo) {
         $dst = Invoke-Gh api "repos/$TargetOrg/$targetName" | ConvertFrom-Json
         $teamRepo = Invoke-Gh api "orgs/$TargetOrg/teams/$TeamSlug/repos/$TargetOrg/$targetName" `
             -H "Accept: application/vnd.github.v3.repository+json" | ConvertFrom-Json
-        $srcHeads = (& git ls-remote --heads $srcUrl | Measure-Object).Count
-        $dstHeads = (& git ls-remote --heads $dstUrl | Measure-Object).Count
-        $srcTags  = (& git ls-remote --tags  $srcUrl | Measure-Object).Count
-        $dstTags  = (& git ls-remote --tags  $dstUrl | Measure-Object).Count
+        $srcHeads = Get-RefCount $srcUrl 'heads'
+        $dstHeads = Get-RefCount $dstUrl 'heads'
+        $srcTags  = Get-RefCount $srcUrl 'tags'
+        $dstTags  = Get-RefCount $dstUrl 'tags'
 
         $ok = ($dst.default_branch -eq $defaultBranch) -and
               ($dst.visibility     -eq $visibility) -and
