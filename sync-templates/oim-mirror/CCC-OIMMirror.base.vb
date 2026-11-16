@@ -1,26 +1,3 @@
-﻿<#
-  Install-OIMMirrorTemplate.ps1
-  Installs / updates the Synchronization Editor project template "OIM v9.2 to v10 mirror"
-  (table DPRTemplate, UID CCC-0D1A2B3C4D5E4F60A1B2C3D4E5F60718) in a One Identity Manager v10 database.
-
-  Run it against the v10 database (NOT v9.2). Afterwards, in Synchronization Editor (logged in to v10):
-  New project -> Generic database connector -> SQL Server -> connection to the v9.2 database
-  (untick "Fill in system description completely") -> template "OIM v9.2 to v10 mirror" -> read-only.
-
-  Examples:
-    .\Install-OIMMirrorTemplate.ps1 -SqlServer sqlv10 -Database OneIM
-    .\Install-OIMMirrorTemplate.ps1 -SqlServer sqlv10 -Database OneIM -SqlUser sa -SqlPassword '...'
-#>
-param(
-    [Parameter(Mandatory)] [string] $SqlServer,
-    [Parameter(Mandatory)] [string] $Database,
-    [string] $SqlUser,
-    [string] $SqlPassword
-)
-$ErrorActionPreference = 'Stop'
-$uid = 'CCC-0D1A2B3C4D5E4F60A1B2C3D4E5F60718'
-
-$code = @'
 References VI.Parsers.dll
 References VI.TSUtils.dll
 References VI.DB.dll
@@ -61,16 +38,25 @@ Imports System.Text
 	' ============================================================================
 
 	' ---- configuration: tables in workflow order ----
-	Private ReadOnly m_Tables As String() = {"Person"}
+	Private Const m_RecipeKey As String = "{{RECIPE_KEY}}"
+	Private Const m_RecipeName As String = "{{RECIPE_NAME}}"
+	Private ReadOnly m_Tables As String() = {{{TABLES}}}
+
+	' ---- reference columns filled in a second step (<Table>_Refs), so the objects they point to
+	'      can be migrated later (IT Shop products, owners, servers, hardware) ----
+	Private ReadOnly m_LateColumns As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase) {{LATE_INIT}}
+
+	' ---- source (v9.2) scope filters: table -> SQL condition ----
+	Private ReadOnly m_SourceFilters As New Dictionary(Of String, String)(StringComparer.OrdinalIgnoreCase) {{FILTER_INIT}}
 
 	' ---- columns never mapped ----
 	Private ReadOnly m_ExcludedColumns As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase) From {
 		"XObjectKey", "XDateInserted", "XDateUpdated", "XUserInserted", "XUserUpdated",
-		"XTouched", "XDateSubItem", "XMarkedForDeletion", "XOrigin", "XIsInEffect"}
+		"XTouched", "XDateSubItem", "XMarkedForDeletion", "XOrigin", "XIsInEffect", "RiskIndexCalculated"}
 
 	Private Const m_TargetSystemType As String = "OIMMIRROR"
 	Private Const m_TargetSystemTypeDisplay As String = "OIM v9.2 mirror"
-	Private Const m_WorkflowNameMirror As String = "Mirror v9.2 to v10"
+	Private ReadOnly m_WorkflowNameMirror As String = "Mirror v9.2 to v10 (" & m_RecipeName & ")"
 	Private ReadOnly m_LogFile As String = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "OIMMirror-template-log.txt")
 
 	Private m_user_id As String
@@ -117,8 +103,8 @@ Imports System.Text
 		m_user_id = SystemVariable.Unmask(con.ConnectionParameter("user id", "").ToString())
 		m_password = SystemVariable.Unmask(con.ConnectionParameter("password", "").ToString())
 		m_pooling = con.ConnectionParameter("pooling", "True").ToString()
-		m_rootIdentifier = String.Format("{0}@{1}", m_initialCatalog, m_dataSource)
-		DefaultShellDisplay = String.Format("OIM mirror {0}@{1}", m_initialCatalog, m_dataSource)
+		m_rootIdentifier = String.Format("{0}@{1}#{2}", m_initialCatalog, m_dataSource, m_RecipeKey)
+		DefaultShellDisplay = String.Format("OIM mirror ({2}) {0}@{1}", m_initialCatalog, m_dataSource, m_RecipeName)
 		DefaultShellDescription = "Mirror of One Identity Manager v9.2 data into v10 (generic MSSQL connector, read-only, matching by UID)"
 		LoadColumnMetadata()
 	End Sub
@@ -187,7 +173,7 @@ Imports System.Text
 			root("Ident_UNSRoot").NewValue = "OIMMirror_" & root.GetValue("UID_UNSRootB").String.Replace("-"c, "_"c)
 			root("DistinguishedName").NewValue = "oimmirror=" & m_rootIdentifier.Replace(",", "\,").Replace("=", "\=")
 			root("CanonicalName").NewValue = m_rootIdentifier
-			root("DisplayName").NewValue = "OIM v9.2 mirror " & m_rootIdentifier
+			root("DisplayName").NewValue = "OIM v9.2 mirror (" & m_RecipeName & ") " & m_rootIdentifier
 			root("NamespaceManagedBy").NewValue = "VISYNC"
 			root("UID_DPRNameSpace").NewValue = namespaceUID
 		End If
@@ -253,6 +239,7 @@ Imports System.Text
 				Dim map = ShellUtils.AddMap(Shell, mapName, leftType.Name, rightType.Name, "Mirror " & tbl, SystemMappingDirection.ToTheLeft,
 											leftType.MasterClass.Name, rightType.MasterClass.Name, SystemMapCapabilities.Default, False, mapName)
 				Dim mapped As New List(Of String)
+				Dim refCols As New List(Of String)
 				Dim skipped As New List(Of String)
 				For Each lp As ISchemaProperty In leftType.Properties
 					Dim n As String = lp.Name
@@ -261,7 +248,10 @@ Imports System.Text
 						skipped.Add(n & "(ro)")
 						Continue For
 					End If
-					If selfRef.Contains(n) Then Continue For
+					If selfRef.Contains(n) OrElse (m_LateColumns.Contains(n) AndAlso Not pk.Contains(n, StringComparer.OrdinalIgnoreCase)) Then
+						If FindProperty(rightType, n) IsNot Nothing Then refCols.Add(n)
+						Continue For
+					End If
 					Dim rp As ISchemaProperty = FindProperty(rightType, n)
 					If rp Is Nothing Then
 						skipped.Add(n & "(no source)")
@@ -274,18 +264,18 @@ Imports System.Text
 					mapped.Add(n)
 				Next
 				m_MapOrder.Add(mapName)
-				Log(String.Format("{0}: mapped {1} columns; skipped: {2}", tbl, mapped.Count, String.Join(", ", skipped)))
+				Log(String.Format("{0}: mapped {1} columns; second step: {2}; skipped: {3}", tbl, mapped.Count, String.Join(",", refCols), String.Join(", ", skipped)))
 
 				' second map for self references (filled after all objects exist)
-				If selfRef.Count > 0 Then
-					Dim mapSelf As String = tbl & "_SelfRef"
-					Dim map2 = ShellUtils.AddMap(Shell, mapSelf, leftType.Name, rightType.Name, "Mirror " & tbl & " self references", SystemMappingDirection.ToTheLeft,
+				If refCols.Count > 0 Then
+					Dim mapSelf As String = tbl & "_Refs"
+					Dim map2 = ShellUtils.AddMap(Shell, mapSelf, leftType.Name, rightType.Name, "Mirror " & tbl & " references filled after all objects exist", SystemMappingDirection.ToTheLeft,
 												 leftType.MasterClass.Name, rightType.MasterClass.Name, SystemMapCapabilities.Default, False, mapSelf)
 					For Each k As String In pk
 						Dim rk As ISchemaProperty = FindProperty(rightType, k)
 						If rk IsNot Nothing Then ShellUtils.AddKeyRule(map2, k, rk.Name, True, "Key_" & k, "Key " & k, 0D)
 					Next
-					For Each sr As String In selfRef
+					For Each sr As String In refCols
 						Dim rp As ISchemaProperty = FindProperty(rightType, sr)
 						If rp IsNot Nothing Then ShellUtils.AddMappingRuleToTheLeft(map2, sr, rp.Name, False, False, False, "R_" & sr, sr)
 					Next
@@ -299,24 +289,34 @@ Imports System.Text
 	End Sub
 	Private m_SelfRefMaps As New List(Of String)
 
+	Private Function FindMethod(t As ISchemaType, name As String) As ISchemaMethod
+		For Each m As ISchemaMethod In t.Methods
+			If String.Equals(m.Name, name, StringComparison.OrdinalIgnoreCase) Then Return m
+		Next
+		Log("no method " & name & " on " & t.Name)
+		Return Nothing
+	End Function
+
 	Private Sub ConfigureStep(theStep As IProjectionStep)
 		theStep.ProjectionDirection = ProjectionDirection.ToTheLeft
 		Dim leftType = theStep.Map.SchemaClassLeft.SchemaType
-		Dim isSelfRef As Boolean = theStep.Map.Name.EndsWith("_SelfRef")
+		Dim isSelfRef As Boolean = theStep.Map.Name.EndsWith("_Refs")
 
 		' objects only in v9.2 -> Insert (not for the self reference step)
 		For Each m As ISchemaMethodAssignment In theStep.MatchingSets.DifferenceLeftToRight.LeftMethods.ToList()
 			theStep.MatchingSets.DifferenceLeftToRight.LeftMethods.Remove(m.Name)
 		Next
 		If Not isSelfRef Then
-			theStep.MatchingSets.DifferenceLeftToRight.LeftMethods.Add(New SchemaMethodAssignment(leftType.Methods("Insert"), ProjectionDirectionAssignment.ToLeft, ProjectionCondition.True))
+			Dim mIns As ISchemaMethod = FindMethod(leftType, "Insert")
+			If mIns IsNot Nothing Then theStep.MatchingSets.DifferenceLeftToRight.LeftMethods.Add(New SchemaMethodAssignment(mIns, ProjectionDirectionAssignment.ToLeft, ProjectionCondition.True))
 		End If
 
 		' objects in both -> Update
 		For Each m As ISchemaMethodAssignment In theStep.MatchingSets.IntersectionWithDifferences.LeftMethods.ToList()
 			theStep.MatchingSets.IntersectionWithDifferences.LeftMethods.Remove(m.Name)
 		Next
-		theStep.MatchingSets.IntersectionWithDifferences.LeftMethods.Add(New SchemaMethodAssignment(leftType.Methods("Update"), ProjectionDirectionAssignment.ToLeft, ProjectionCondition.True))
+		Dim mUpd As ISchemaMethod = FindMethod(leftType, "Update")
+		If mUpd IsNot Nothing Then theStep.MatchingSets.IntersectionWithDifferences.LeftMethods.Add(New SchemaMethodAssignment(mUpd, ProjectionDirectionAssignment.ToLeft, ProjectionCondition.True))
 
 		' objects only in v10 -> nothing in the daily run (deletes are a separate decision)
 		For Each m As ISchemaMethodAssignment In theStep.MatchingSets.DifferenceRightToLeft.LeftMethods.ToList()
@@ -386,13 +386,30 @@ Imports System.Text
 		Return
 	End Sub
 
+	Private m_SourceScope As SystemScopeDefinition
+
 	Protected Overrides Sub OnCreateScopes()
-		Return
+		If m_SourceFilters.Count = 0 Then Return
+		Dim rightSchema As ISchema = GetConnection("ConnectedSystemConnection").Schema
+		Dim scope = New SystemScopeDefinition("_sourcescope", "Source scope (v9.2)", rightSchema)
+		For Each kv In m_SourceFilters
+			Dim t As ISchemaType = FindRightType(rightSchema, kv.Key)
+			If t Is Nothing Then Continue For
+			Dim flt = New VI.Projector.Filter.SystemObjectFilterJoin(New VI.Projector.Filter.SystemObjectNativeSystemFilter(kv.Value),
+				VI.Projector.Filter.SystemObjectDataFilter.Default, VI.Projector.Filter.SystemObjectFilter.Default)
+			Dim sf = New SystemScopeFilter(t, flt)
+			sf.DisplayName = kv.Key
+			scope.SetFilter(sf)
+			Log("source filter " & t.Name & ": " & kv.Value)
+		Next
+		scope.GlobalHierarchyFilter = VI.Projector.Filter.HierarchyFilter.Default
+		Shell.Scopes.Add(scope)
+		m_SourceScope = scope
 	End Sub
 
 	Protected Overrides Sub OnCreateProjectionStartInfos()
 		Dim si = New VI.Projector.Projection.ProjectionStartInfo()
-		si.DisplayName = String.Format("Mirror v9.2 {0}@{1}", m_initialCatalog, m_dataSource)
+		si.DisplayName = String.Format("Mirror v9.2 ({2}) {0}@{1}", m_initialCatalog, m_dataSource, m_RecipeName)
 		si.DefaultProjectionDirection = VI.Projector.Projection.ProjectionDirection.ToTheLeft
 		si.VariableSet = Shell.DefaultVariableSet
 		si.Schedule = DatabaseHelper.CreateDefaultSynchonizationSchedule(DbSession, Shell, si)
@@ -406,6 +423,9 @@ Imports System.Text
 	End Sub
 
 	Protected Overrides Sub OnPostProcessing()
+		If m_SourceScope IsNot Nothing Then
+			Shell.Connections("ConnectedSystemConnection").Scope.Definition = m_SourceScope
+		End If
 		Log("=== OnPostProcessing done")
 	End Sub
 
@@ -416,35 +436,3 @@ Imports System.Text
 			Return
 		End Get
 	End Property
-
-'@
-
-if ($SqlUser) { $auth = "User ID=$SqlUser;Password=$SqlPassword" } else { $auth = 'Integrated Security=True' }
-$cn = New-Object System.Data.SqlClient.SqlConnection "Server=$SqlServer;Database=$Database;$auth;TrustServerCertificate=True"
-$cn.Open()
-try {
-    $chk = $cn.CreateCommand()
-    $chk.CommandText = "SELECT COUNT(*) FROM DialogDatabase WHERE IsMainDatabase = 1"
-    [void]$chk.ExecuteScalar()
-
-    $c = $cn.CreateCommand()
-    $c.CommandText = @"
-IF EXISTS (SELECT 1 FROM DPRTemplate WHERE UID_DPRTemplate = @uid)
-  UPDATE DPRTemplate SET ScriptCode = @code, Revision = Revision + 1,
-         XDateUpdated = GETUTCDATE(), XUserUpdated = SUSER_SNAME()
-   WHERE UID_DPRTemplate = @uid
-ELSE
-  INSERT INTO DPRTemplate (UID_DPRTemplate, DisplayName, Description, ScriptCode, ScriptLanguage, SupportedScriptLanguages,
-         ConnectedSystem, ConnectedSystemSubType, ConnectedSystemVersion, TemplateType, IsGenerated, Revision, SortOrder,
-         XObjectKey, XDateInserted, XDateUpdated, XUserInserted, XUserUpdated)
-  VALUES (@uid, 'OIM v9.2 to v10 mirror',
-         'Mirror of One Identity Manager v9.2 data into v10 via the generic MSSQL connector (read-only, matching by UID).',
-         @code, 'VisualBasicNet', 'VisualBasicNet', 'DB', 'MSSql', '7.0.2015.402', 'ShellTemplate', 0, 1, 0,
-         '<Key><T>DPRTemplate</T><P>' + @uid + '</P></Key>', GETUTCDATE(), GETUTCDATE(), SUSER_SNAME(), SUSER_SNAME())
-"@
-    [void]$c.Parameters.AddWithValue('@uid', $uid)
-    [void]$c.Parameters.AddWithValue('@code', $code)
-    [void]$c.ExecuteNonQuery()
-    Write-Host "Template 'OIM v9.2 to v10 mirror' installed in $SqlServer/$Database."
-}
-finally { $cn.Close() }
