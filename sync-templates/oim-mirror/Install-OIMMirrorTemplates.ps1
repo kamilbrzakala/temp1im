@@ -234,6 +234,24 @@ Imports System.Text
 		Return Nothing
 	End Function
 
+	' One matching rule per map: the primary key when it is a single column; for multi-column keys
+	' (M:N tables, role assignment views) the XObjectKey, which is built from the same UIDs on both sides.
+	' (Several key rules are evaluated one by one, so a composite key cannot be split into rules.)
+	Private Sub AddMatching(map As ISystemMap, leftType As ISchemaType, rightType As ISchemaType, pk As List(Of String))
+		If pk.Count = 1 Then
+			Dim rk As ISchemaProperty = FindProperty(rightType, pk(0))
+			If rk IsNot Nothing Then
+				ShellUtils.AddKeyRule(map, pk(0), rk.Name, True, "Key_" & pk(0), "Key " & pk(0), 0D)
+				Return
+			End If
+		End If
+		If FindProperty(leftType, "XObjectKey") IsNot Nothing AndAlso FindProperty(rightType, "XObjectKey") IsNot Nothing Then
+			ShellUtils.AddKeyRule(map, "XObjectKey", FindProperty(rightType, "XObjectKey").Name, True, "Key_XObjectKey", "Key XObjectKey", 0D)
+		Else
+			Log("WARNING no usable matching rule for " & leftType.Name)
+		End If
+	End Sub
+
 	Protected Overrides Sub OnCreateSystemMaps()
 		Log("=== OnCreateSystemMaps")
 		Dim leftSchema As ISchema = GetConnection("MainConnection").Schema
@@ -279,12 +297,10 @@ Imports System.Text
 						skipped.Add(n & "(no source)")
 						Continue For
 					End If
-					If pk.Contains(n, StringComparer.OrdinalIgnoreCase) Then
-						ShellUtils.AddKeyRule(map, n, rp.Name, True, "Key_" & n, "Key " & n, 0D)
-					End If
 					ShellUtils.AddMappingRuleToTheLeft(map, n, rp.Name, False, False, False, "R_" & n, n)
 					mapped.Add(n)
 				Next
+				AddMatching(map, leftType, rightType, pk)
 				m_MapOrder.Add(mapName)
 				Log(String.Format("{0}: mapped {1} columns; second step: {2}; skipped: {3}", tbl, mapped.Count, String.Join(",", refCols), String.Join(", ", skipped)))
 
@@ -293,10 +309,7 @@ Imports System.Text
 					Dim mapSelf As String = tbl & "_Refs"
 					Dim map2 = ShellUtils.AddMap(Shell, mapSelf, leftType.Name, rightType.Name, "Mirror " & tbl & " references filled after all objects exist", SystemMappingDirection.ToTheLeft,
 												 leftType.MasterClass.Name, rightType.MasterClass.Name, SystemMapCapabilities.Default, False, mapSelf)
-					For Each k As String In pk
-						Dim rk As ISchemaProperty = FindProperty(rightType, k)
-						If rk IsNot Nothing Then ShellUtils.AddKeyRule(map2, k, rk.Name, True, "Key_" & k, "Key " & k, 0D)
-					Next
+					AddMatching(map2, leftType, rightType, pk)
 					For Each sr As String In refCols
 						Dim rp As ISchemaProperty = FindProperty(rightType, sr)
 						If rp IsNot Nothing Then ShellUtils.AddMappingRuleToTheLeft(map2, sr, rp.Name, False, False, False, "R_" & sr, sr)
@@ -675,6 +688,24 @@ Imports System.Text
 		Return Nothing
 	End Function
 
+	' One matching rule per map: the primary key when it is a single column; for multi-column keys
+	' (M:N tables, role assignment views) the XObjectKey, which is built from the same UIDs on both sides.
+	' (Several key rules are evaluated one by one, so a composite key cannot be split into rules.)
+	Private Sub AddMatching(map As ISystemMap, leftType As ISchemaType, rightType As ISchemaType, pk As List(Of String))
+		If pk.Count = 1 Then
+			Dim rk As ISchemaProperty = FindProperty(rightType, pk(0))
+			If rk IsNot Nothing Then
+				ShellUtils.AddKeyRule(map, pk(0), rk.Name, True, "Key_" & pk(0), "Key " & pk(0), 0D)
+				Return
+			End If
+		End If
+		If FindProperty(leftType, "XObjectKey") IsNot Nothing AndAlso FindProperty(rightType, "XObjectKey") IsNot Nothing Then
+			ShellUtils.AddKeyRule(map, "XObjectKey", FindProperty(rightType, "XObjectKey").Name, True, "Key_XObjectKey", "Key XObjectKey", 0D)
+		Else
+			Log("WARNING no usable matching rule for " & leftType.Name)
+		End If
+	End Sub
+
 	Protected Overrides Sub OnCreateSystemMaps()
 		Log("=== OnCreateSystemMaps")
 		Dim leftSchema As ISchema = GetConnection("MainConnection").Schema
@@ -720,12 +751,10 @@ Imports System.Text
 						skipped.Add(n & "(no source)")
 						Continue For
 					End If
-					If pk.Contains(n, StringComparer.OrdinalIgnoreCase) Then
-						ShellUtils.AddKeyRule(map, n, rp.Name, True, "Key_" & n, "Key " & n, 0D)
-					End If
 					ShellUtils.AddMappingRuleToTheLeft(map, n, rp.Name, False, False, False, "R_" & n, n)
 					mapped.Add(n)
 				Next
+				AddMatching(map, leftType, rightType, pk)
 				m_MapOrder.Add(mapName)
 				Log(String.Format("{0}: mapped {1} columns; second step: {2}; skipped: {3}", tbl, mapped.Count, String.Join(",", refCols), String.Join(", ", skipped)))
 
@@ -734,10 +763,7 @@ Imports System.Text
 					Dim mapSelf As String = tbl & "_Refs"
 					Dim map2 = ShellUtils.AddMap(Shell, mapSelf, leftType.Name, rightType.Name, "Mirror " & tbl & " references filled after all objects exist", SystemMappingDirection.ToTheLeft,
 												 leftType.MasterClass.Name, rightType.MasterClass.Name, SystemMapCapabilities.Default, False, mapSelf)
-					For Each k As String In pk
-						Dim rk As ISchemaProperty = FindProperty(rightType, k)
-						If rk IsNot Nothing Then ShellUtils.AddKeyRule(map2, k, rk.Name, True, "Key_" & k, "Key " & k, 0D)
-					Next
+					AddMatching(map2, leftType, rightType, pk)
 					For Each sr As String In refCols
 						Dim rp As ISchemaProperty = FindProperty(rightType, sr)
 						If rp IsNot Nothing Then ShellUtils.AddMappingRuleToTheLeft(map2, sr, rp.Name, False, False, False, "R_" & sr, sr)
