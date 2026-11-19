@@ -1,21 +1,24 @@
--- 1) Which table do the references point to?
-SELECT SUBSTRING(s.ObjectKeyOfAssignedOrg,
-                 CHARINDEX('<T>', s.ObjectKeyOfAssignedOrg) + 3,
-                 CHARINDEX('</T>', s.ObjectKeyOfAssignedOrg) - CHARINDEX('<T>', s.ObjectKeyOfAssignedOrg) - 3) AS TargetTable,
-       b.Ident_Org, b.FullPath, b.UID_OrgRoot, COUNT(*) AS Steps
-FROM PWODecisionStep s
-LEFT JOIN BaseTree b ON b.XObjectKey = s.ObjectKeyOfAssignedOrg
-WHERE ISNULL(s.ObjectKeyOfAssignedOrg, '') <> ''
-GROUP BY s.ObjectKeyOfAssignedOrg, b.Ident_Org, b.FullPath, b.UID_OrgRoot
-ORDER BY Steps DESC;
+-- Business roles referenced by approval steps, plus all their parents
+WITH refs AS (
+    SELECT DISTINCT o.UID_Org
+    FROM PWODecisionStep s
+    JOIN Org o ON o.XObjectKey = s.ObjectKeyOfAssignedOrg
+),
+tree AS (
+    SELECT o.UID_Org, o.UID_ParentOrg, o.Ident_Org, o.FullPath, o.UID_OrgRoot, 0 AS Lvl
+    FROM Org o JOIN refs r ON r.UID_Org = o.UID_Org
+    UNION ALL
+    SELECT p.UID_Org, p.UID_ParentOrg, p.Ident_Org, p.FullPath, p.UID_OrgRoot, t.Lvl + 1
+    FROM Org p JOIN tree t ON p.UID_Org = t.UID_ParentOrg
+)
+SELECT DISTINCT UID_Org, Ident_Org, FullPath, UID_OrgRoot, UID_ParentOrg
+FROM tree
+ORDER BY FullPath;
 
--- 2) Fallback name search across all role types
-SELECT Ident_Org, FullPath, UID_OrgRoot, XObjectKey
-FROM BaseTree
-WHERE Ident_Org LIKE '%Escalation Approvers%'
-   OR Ident_Org LIKE '%Attestation Remediation%'
-   OR Ident_Org LIKE '%Employee Administrator%'
-   OR Ident_Org LIKE '%Non Person Approvers%';
+-- Ready-made filter for the custom transport (Org table)
+SELECT 'UID_Org IN (' + STRING_AGG('''' + UID_Org + '''', ',') + ')' AS OrgFilter
+FROM (SELECT DISTINCT o.UID_Org
+      FROM PWODecisionStep s JOIN Org o ON o.XObjectKey = s.ObjectKeyOfAssignedOrg) x;
 
 
 
