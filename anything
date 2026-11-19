@@ -1,38 +1,6 @@
-DECLARE @sql nvarchar(max) = N'';
-SELECT @sql = @sql + N'UNION ALL SELECT N''' + t.TableName + N''' AS TableName, COUNT(*) AS CustomRows FROM dbo.' + QUOTENAME(t.TableName)
-  + N' WHERE ' + QUOTENAME(c.ColumnName) + N' NOT LIKE ''[A-Z][A-Z0-9][A-Z0-9]-%'' OR ' + QUOTENAME(c.ColumnName) + N' LIKE ''CCC-%'' '
-FROM DialogTable t
-JOIN DialogColumn c ON c.UID_DialogTable = t.UID_DialogTable AND c.IsPKMember = 1
-JOIN sys.tables st ON st.name = t.TableName
-WHERE (SELECT COUNT(*) FROM DialogColumn c2 WHERE c2.UID_DialogTable = t.UID_DialogTable AND c2.IsPKMember = 1) = 1;
-SET @sql = STUFF(@sql, 1, 10, N'');
-CREATE TABLE #inv (TableName nvarchar(128), CustomRows int);
-INSERT #inv EXEC (@sql);
-SELECT TableName, CustomRows FROM #inv WHERE CustomRows > 0 ORDER BY TableName;
-
-DECLARE @j varchar(38) =
- (SELECT TOP 1 UID_DPRJournal FROM DPRJournal
-   WHERE ProjectionConfigDisplay LIKE 'Mirror v9.2 to v10 (Active Directory)%'
-   ORDER BY CreationTime DESC);
-
-SELECT f.ProjectionStepDisplay AS Step,
-       e.Error,
-       COUNT(*) AS Objects,
-       MIN(f.ObjectDisplay) AS ExampleObject
-FROM DPRJournalFailure f
-CROSS APPLY (SELECT CAST(f.Reason AS nvarchar(max)) AS R) r
-CROSS APPLY (SELECT CASE WHEN CHARINDEX('Database error', r.R) > 0
-                         THEN SUBSTRING(r.R, CHARINDEX('Database error', r.R), 500)
-                         ELSE LEFT(r.R, 500) END AS M) m
-CROSS APPLY (SELECT LEFT(CASE WHEN CHARINDEX('Invalid Value', m.M) > 0
-                              THEN LEFT(m.M, CHARINDEX('Invalid Value', m.M) - 1)
-                              ELSE m.M END, 300) AS Error) e
-WHERE f.UID_DPRJournal = @j
-GROUP BY f.ProjectionStepDisplay, e.Error
-ORDER BY Objects DESC;
-
-SELECT MessageType, LEFT(CAST(MessageString AS nvarchar(max)), 300) AS Msg, COUNT(*) AS N
-FROM DPRJournalMessage
-WHERE UID_DPRJournal = @j AND MessageType IN ('Error','Warning')
-GROUP BY MessageType, LEFT(CAST(MessageString AS nvarchar(max)), 300)
-ORDER BY N DESC;
+SELECT DB_NAME() AS db, r.Ident_AERole, r.FullPath, r.UID_AERole,
+       p.FullPath AS ParentPath, r.UID_ParentAERole, r.UID_AERoleManager, r.XUserInserted, r.XDateInserted
+FROM AERole r
+LEFT JOIN AERole p ON p.UID_AERole = r.UID_ParentAERole
+WHERE r.Ident_AERole IN (N'Escalation Approvers', N'Attestation Remediation', N'Employee Administrator', N'Non Person Approvers')
+ORDER BY r.FullPath;
