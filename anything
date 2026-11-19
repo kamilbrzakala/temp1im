@@ -1,67 +1,18 @@
-/* =====================================================================
-   Capture external references BEFORE clicking "Remove" in the
-   Database Transporter, and generate UPDATE statements to restore them
-   in the target (clean v10) AFTER the transport import.
-
-   1) Run each SELECT on the SOURCE db (upgraded v10 copy).
-   2) Save the generated UPDATE statements (result column) to a file.
-   3) Import the transport into the target.
-   4) Make sure the referenced AERoles / schedules exist in the target.
-   5) Run the saved UPDATE statements on the TARGET.
-
-   The restore matches roles by FullPath and schedules by Name, so it also
-   works if the AERoles were created manually with NEW UIDs. Transported
-   objects (PWODecisionStep, DialogDashBoardDef) keep their UIDs.
-   Each UPDATE affects 0 rows if the role/schedule is missing in target -
-   run the CHECK queries at the bottom afterwards.
-   ===================================================================== */
-
-SET NOCOUNT ON;
-
-/* ---------- 1. PWODecisionStep.ObjectKeyOfAssignedOrg (approver role) -- */
-SELECT
-    '-- ' + REPLACE(s.Ident_PWODecisionStep, CHAR(13) + CHAR(10), ' ') + CHAR(13) + CHAR(10) +
-    'UPDATE s SET s.ObjectKeyOfAssignedOrg = r.XObjectKey ' +
-    'FROM PWODecisionStep s JOIN AERole r ON r.FullPath = N''' + REPLACE(r.FullPath, '''', '''''') + ''' ' +
-    'WHERE s.UID_PWODecisionStep = ''' + s.UID_PWODecisionStep + ''';' AS RestoreStatement
+-- 1) Which table do the references point to?
+SELECT SUBSTRING(s.ObjectKeyOfAssignedOrg,
+                 CHARINDEX('<T>', s.ObjectKeyOfAssignedOrg) + 3,
+                 CHARINDEX('</T>', s.ObjectKeyOfAssignedOrg) - CHARINDEX('<T>', s.ObjectKeyOfAssignedOrg) - 3) AS TargetTable,
+       b.Ident_Org, b.FullPath, b.UID_OrgRoot, COUNT(*) AS Steps
 FROM PWODecisionStep s
-JOIN AERole r ON r.XObjectKey = s.ObjectKeyOfAssignedOrg
-ORDER BY s.Ident_PWODecisionStep;
+LEFT JOIN BaseTree b ON b.XObjectKey = s.ObjectKeyOfAssignedOrg
+WHERE ISNULL(s.ObjectKeyOfAssignedOrg, '') <> ''
+GROUP BY s.ObjectKeyOfAssignedOrg, b.Ident_Org, b.FullPath, b.UID_OrgRoot
+ORDER BY Steps DESC;
 
-/* ---------- 2. PWODecisionStep.UID_AERoleFallBack (fallback approver) -- */
-SELECT
-    '-- ' + REPLACE(s.Ident_PWODecisionStep, CHAR(13) + CHAR(10), ' ') + CHAR(13) + CHAR(10) +
-    'UPDATE s SET s.UID_AERoleFallBack = r.UID_AERole ' +
-    'FROM PWODecisionStep s JOIN AERole r ON r.FullPath = N''' + REPLACE(r.FullPath, '''', '''''') + ''' ' +
-    'WHERE s.UID_PWODecisionStep = ''' + s.UID_PWODecisionStep + ''';' AS RestoreStatement
-FROM PWODecisionStep s
-JOIN AERole r ON r.UID_AERole = s.UID_AERoleFallBack
-ORDER BY s.Ident_PWODecisionStep;
-
-/* ---------- 3. DialogDashBoardDef.UID_DialogSchedule -------------------- */
-SELECT
-    '-- ' + d.Name + CHAR(13) + CHAR(10) +
-    'UPDATE d SET d.UID_DialogSchedule = ds.UID_DialogSchedule ' +
-    'FROM DialogDashBoardDef d JOIN DialogSchedule ds ON ds.Name = N''' + REPLACE(ds.Name, '''', '''''') + ''' ' +
-    'WHERE d.UID_DialogDashBoardDef = ''' + d.UID_DialogDashBoardDef + ''';' AS RestoreStatement
-FROM DialogDashBoardDef d
-JOIN DialogSchedule ds ON ds.UID_DialogSchedule = d.UID_DialogSchedule
-ORDER BY d.Name;
-
-/* ---------- 4. (optional) RPSReport.UID_PersonOwner ----------------------
-   Only useful if identities exist in the target. Matches by CentralAccount. */
-SELECT
-    '-- ' + rp.Ident_RPSReport + CHAR(13) + CHAR(10) +
-    'UPDATE rp SET rp.UID_PersonOwner = p.UID_Person ' +
-    'FROM RPSReport rp JOIN Person p ON p.CentralAccount = N''' + REPLACE(p.CentralAccount, '''', '''''') + ''' ' +
-    'WHERE rp.UID_RPSReport = ''' + rp.UID_RPSReport + ''';' AS RestoreStatement
-FROM RPSReport rp
-JOIN Person p ON p.UID_Person = rp.UID_PersonOwner
-ORDER BY rp.Ident_RPSReport;
-
-/* =====================================================================
-   CHECK on TARGET after restore - anything listed here is still empty
-   ===================================================================== */
--- SELECT Ident_PWODecisionStep FROM PWODecisionStep
---  WHERE ISNULL(ObjectKeyOfAssignedOrg,'') = '' AND Ident_PWODecisionStep LIKE '%Members of a certain role%';
--- SELECT Name FROM DialogDashBoardDef WHERE ISNULL(UID_DialogSchedule,'') = '';
+-- 2) Fallback name search across all role types
+SELECT Ident_Org, FullPath, UID_OrgRoot, XObjectKey
+FROM BaseTree
+WHERE Ident_Org LIKE '%Escalation Approvers%'
+   OR Ident_Org LIKE '%Attestation Remediation%'
+   OR Ident_Org LIKE '%Employee Administrator%'
+   OR Ident_Org LIKE '%Non Person Approvers%';
