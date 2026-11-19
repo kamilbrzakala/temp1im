@@ -16,3 +16,38 @@ WHERE Ident_Org LIKE '%Escalation Approvers%'
    OR Ident_Org LIKE '%Attestation Remediation%'
    OR Ident_Org LIKE '%Employee Administrator%'
    OR Ident_Org LIKE '%Non Person Approvers%';
+
+
+
+
+=================================================================================
+
+1. On v9.2, before clicking Remove, capture the links. This generates the restore statements:
+
+sql
+  SELECT '-- ' + s.Ident_PWODecisionStep + CHAR(13)+CHAR(10) +
+         'UPDATE s SET s.ObjectKeyOfAssignedOrg = o.XObjectKey ' +
+         'FROM PWODecisionStep s JOIN Org o ON o.FullPath = N''' + REPLACE(o.FullPath,'''','''''') + ''' ' +
+         'WHERE s.UID_PWODecisionStep = ''' + s.UID_PWODecisionStep + ''';' AS RestoreStatement
+  FROM PWODecisionStep s
+  JOIN Org o ON o.XObjectKey = s.ObjectKeyOfAssignedOrg
+  ORDER BY o.FullPath, s.Ident_PWODecisionStep;
+
+Save the 56 rows (35 + 18 + 2 + 1).
+
+2. Click Remove on all rows and finish the export, build the delta, and import it into v10.
+
+3. Get the 4 business roles into v10. Check the role class first:
+
+sql
+SELECT * FROM OrgRoot WHERE UID_OrgRoot = '6880a56c-4fd7-4144-847a-04728bc412bd';
+Option A, through your OIMMirror sync: if it already syncs OrgRoot, Org and PersonInOrg, the roles and their members arrive automatically. This is the better route, because an approver role without members means approvals route to no one.
+Option B, manually: create the role class, then the 4 business roles under it in Manager with exactly the same names and hierarchy, so FullPath matches. Then add members.
+
+4. On v10, run the saved UPDATE statements, then check:
+
+sql
+SELECT Ident_PWODecisionStep FROM PWODecisionStep
+WHERE ISNULL(ObjectKeyOfAssignedOrg,'') = '' AND Ident_PWODecisionStep LIKE '%Members of a certain role%';
+
+Any step still listed has a FullPath that doesn’t match v10. Compare the paths and fix them.
